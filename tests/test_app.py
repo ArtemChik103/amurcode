@@ -202,6 +202,41 @@ class DataLoadTests(unittest.TestCase):
         self.assertIn("object_key", row)
         self.assertIn("match_confidence", row)
 
+    def test_risk_score_and_level_are_added_to_rows(self):
+        result = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"]})
+        row = result["rows"][0]
+        self.assertIn("risk_score", row)
+        self.assertIn("risk_level", row)
+        self.assertIn("risk_label", row)
+        self.assertIn("risk_explanation", row)
+
+    def test_attention_summary_returns_human_bullets(self):
+        result = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"]})
+        summary = result["attention_summary"]
+        self.assertEqual(summary["title"], "Что требует внимания")
+        self.assertTrue(summary["bullets"])
+        text = " ".join(summary["bullets"])
+        self.assertNotIn("problem_reasons", text)
+        self.assertNotIn("pipeline", text)
+
+    def test_problem_rows_are_sorted_by_risk(self):
+        result = app.query_as_of({
+            "date": ["2026-04-01"],
+            "template": ["skk"],
+            "post_filter": ["execution_problems"],
+        })
+        scores = [row["risk_score"] for row in result["rows"]]
+        self.assertEqual(scores, sorted(scores, reverse=True))
+
+    def test_compare_insights_are_returned(self):
+        result = app.compare_periods({
+            "base": ["2025-02-01"],
+            "target": ["2026-04-01"],
+            "template": ["skk"],
+        })
+        self.assertIn("compare_insights", result)
+        self.assertIn("bullets", result["compare_insights"])
+
     def test_object_detail_returns_first_query_row(self):
         result = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"]})
         row = result["rows"][0]
@@ -209,6 +244,13 @@ class DataLoadTests(unittest.TestCase):
         self.assertEqual(payload["object_key"], row["object_key"])
         self.assertIn("pipeline", payload)
         self.assertIn("documents", payload)
+
+    def test_object_detail_includes_risk(self):
+        query = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"]})
+        key = query["rows"][0]["object_key"]
+        detail = app.object_detail({"date": ["2026-04-01"], "template": ["skk"], "object_key": [key]})
+        self.assertIn("risk_score", detail)
+        self.assertIn("risk_label", detail)
 
     def test_readiness_summary_returns_checks(self):
         payload = app.readiness_response({"date": ["2026-04-01"], "template": ["skk"]})
@@ -354,7 +396,8 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", content_type)
         workbook = load_workbook(BytesIO(body), read_only=True)
-        self.assertEqual(workbook.sheetnames, ["Итоги", "Объекты", "Проблемы", "Исходные строки", "Методика"])
+        self.assertEqual(workbook.sheetnames, ["Выводы", "Итоги", "Объекты", "Проблемы", "Исходные строки", "Методика"])
+        self.assertIn("Выводы", workbook.sheetnames)
         method_text = "\n".join(str(row[0] or "") for row in workbook["Методика"].iter_rows(values_only=True))
         self.assertIn("последний месячный срез", method_text)
 

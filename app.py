@@ -88,6 +88,8 @@ QUICK_ACTIONS = {
         "mode": "slice",
         "template": "skk",
         "post_filter": "execution_problems",
+        "highlight": "top_risks",
+        "open_view": "problems",
         "metrics": ["limit", "obligation", "cash", "agreement", "contract", "payment", "buau"],
     },
     "find_object": {
@@ -774,6 +776,73 @@ def problem_reasons(row: dict) -> list[str]:
     return reasons
 
 
+def risk_score(row: dict) -> int:
+    pipeline = row.get("pipeline") or row_pipeline(row)
+    reasons = row.get("problem_reasons") or problem_reasons(row)
+    plan = float(pipeline.get("plan") or 0)
+    documents = float(pipeline.get("documents") or 0)
+    paid = float(pipeline.get("paid") or 0)
+    cash = float(pipeline.get("cash") or 0)
+    score = 0
+    if "no_cash" in reasons:
+        score += 30
+    if "no_payments" in reasons:
+        score += 25
+    if "no_documents" in reasons:
+        score += 20
+    if "low_cash" in reasons:
+        score += 15
+    if "data_gap" in reasons:
+        score += 15
+    if plan >= 1_000_000_000:
+        score += 10
+    elif plan >= 100_000_000:
+        score += 7
+    if documents > 0 and paid == 0:
+        score += 5
+    if cash == 0 and plan > 0:
+        score += 5
+    return min(score, 100)
+
+
+def risk_level(score: int) -> str:
+    if score >= 75:
+        return "critical"
+    if score >= 50:
+        return "high"
+    if score >= 25:
+        return "medium"
+    return "low"
+
+
+def risk_label(level: str) -> str:
+    return {
+        "critical": "Критичный",
+        "high": "Высокий",
+        "medium": "Средний",
+        "low": "Низкий",
+    }.get(level, "Низкий")
+
+
+def risk_explanation(row: dict) -> list[str]:
+    pipeline = row.get("pipeline") or row_pipeline(row)
+    reasons = row.get("problem_reasons") or problem_reasons(row)
+    explanation = []
+    reason_labels = {
+        "no_cash": "Нет кассового исполнения",
+        "no_payments": "Есть документы, но нет оплат",
+        "no_documents": "Есть план, но нет документов",
+        "low_cash": "Касса ниже 25% от плана",
+        "data_gap": "Данные есть не во всех источниках",
+    }
+    for reason in ("no_cash", "no_payments", "no_documents", "low_cash", "data_gap"):
+        if reason in reasons:
+            explanation.append(reason_labels[reason])
+    if float(pipeline.get("plan") or 0) >= 100_000_000:
+        explanation.append("Крупная сумма плана")
+    return explanation[:4]
+
+
 def row_status_from_reasons(reasons: list[str]) -> str:
     if any(reason in reasons for reason in ("no_documents", "no_payments", "no_cash")):
         return "danger"
@@ -831,6 +900,10 @@ def aggregate(records: list[dict], metrics: list[str] | None = None) -> dict:
         row["pipeline"] = row_pipeline(row)
         row["problem_reasons"] = problem_reasons(row)
         row["status"] = row_status_from_reasons(row["problem_reasons"])
+        row["risk_score"] = risk_score(row)
+        row["risk_level"] = risk_level(row["risk_score"])
+        row["risk_label"] = risk_label(row["risk_level"])
+        row["risk_explanation"] = risk_explanation(row)
         row["total"] = sum(row[metric] for metric in metric_keys)
         rows.append(row)
     rows.sort(key=lambda item: item["total"], reverse=True)
@@ -869,10 +942,80 @@ def apply_aggregate_post_filter(result: dict, post_filter: str, metrics: list[st
         elif selected in reasons:
             rows.append(row)
     filtered = dict(result)
-    filtered["rows"] = rows
+    filtered["rows"] = sorted(
+        rows,
+        key=lambda item: (int(item.get("risk_score") or 0), float((item.get("pipeline") or row_pipeline(item)).get("plan") or 0)),
+        reverse=True,
+    )
     filtered["totals"] = {metric: sum(float(row.get(metric) or 0) for row in rows) for metric in metrics}
     filtered["count"] = len(rows)
     return filtered
+
+
+def attention_summary(result: dict, template: str, date: str) -> dict:
+    rows = result.get("rows") or []
+    if not rows:
+        return {
+            "title": "Что требует внимания",
+            "severity": "empty",
+            "bullets": ["По выбранным условиям нет объектов для проверки."],
+            "top_risks": [],
+        }
+    counts = {reason: 0 for reason in ("no_cash", "no_payments", "no_documents", "low_cash", "data_gap")}
+    for row in rows:
+        for reason in row.get("problem_reasons") or []:
+            if reason in counts:
+                counts[reason] += 1
+    plan_total = sum(float((row.get("pipeline") or row_pipeline(row)).get("plan") or 0) for row in rows)
+    cash_total = sum(float((row.get("pipeline") or row_pipeline(row)).get("cash") or 0) for row in rows)
+    cash_percent = cash_total / plan_total * 100.0 if plan_total > 0 else None
+    has_critical = any(row.get("risk_level") == "critical" for row in rows)
+    has_problems = any(row.get("problem_reasons") for row in rows)
+    if has_critical or (cash_percent is not None and cash_percent < 10):
+        severity = "danger"
+    elif has_problems:
+        severity = "warning"
+    else:
+        severity = "normal"
+
+    candidates = [
+        (counts["no_cash"], 50, f"{counts['no_cash']} объектов без кассового исполнения."),
+        (counts["no_payments"], 45, f"{counts['no_payments']} объектов с документами, но без оплат."),
+        (counts["no_documents"], 40, f"{counts['no_documents']} объектов с планом, но без документов."),
+        (counts["data_gap"], 35, f"{counts['data_gap']} объектов имеют разрыв между источниками."),
+        (counts["low_cash"], 30, f"{counts['low_cash']} объектов с кассой ниже 25% от плана."),
+    ]
+    bullets = [text for count, _, text in sorted(candidates, key=lambda item: (item[0] > 0, item[1], item[0]), reverse=True) if count > 0]
+    if cash_percent is not None:
+        bullets.append(f"Касса составляет {cash_percent:.1f}% от плана.".replace(".", ","))
+    if not bullets:
+        bullets.append("Явных проблем исполнения не найдено.")
+
+    top_rows = sorted(
+        [row for row in rows if int(row.get("risk_score") or 0) >= 25],
+        key=lambda item: (int(item.get("risk_score") or 0), float((item.get("pipeline") or row_pipeline(item)).get("plan") or 0)),
+        reverse=True,
+    )[:5]
+    top_risks = []
+    for row in top_rows:
+        pipeline = row.get("pipeline") or row_pipeline(row)
+        top_risks.append(
+            {
+                "object_key": row.get("object_key", ""),
+                "object_name": row.get("object_name") or row.get("object_code") or "Объект без названия",
+                "risk_score": int(row.get("risk_score") or 0),
+                "risk_label": row.get("risk_label") or risk_label(risk_level(int(row.get("risk_score") or 0))),
+                "plan": float(pipeline.get("plan") or 0),
+                "cash": float(pipeline.get("cash") or 0),
+                "reasons": row.get("risk_explanation") or risk_explanation(row),
+            }
+        )
+    return {
+        "title": "Что требует внимания",
+        "severity": severity,
+        "bullets": bullets[:5],
+        "top_risks": top_risks,
+    }
 
 
 def catalog_objects(records: list[dict], params: dict[str, list[str]]) -> list[dict]:
@@ -1241,10 +1384,12 @@ def query_as_of(params: dict[str, list[str]]) -> dict:
     result = aggregate(filtered, metrics)
     result = apply_aggregate_post_filter(result, params.get("post_filter", [""])[0].strip(), metrics)
     result["timeline"] = as_of_timeline(date, params, metrics)
+    summary = attention_summary(result, params.get("template", ["all"])[0].strip() or "all", date)
     return {
         "view": "as_of",
         "date": date,
         "semantics": AS_OF_SEMANTICS,
+        "attention_summary": summary,
         **result,
     }
 
@@ -1310,6 +1455,10 @@ def object_detail(params: dict[str, list[str]]) -> dict:
         "budget": row.get("budget", ""),
         "status": row.get("status", ""),
         "problem_reasons": row.get("problem_reasons", []),
+        "risk_score": row.get("risk_score", 0),
+        "risk_level": row.get("risk_level", "low"),
+        "risk_label": row.get("risk_label", risk_label("low")),
+        "risk_explanation": row.get("risk_explanation", []),
         "pipeline": row.get("pipeline", {}),
         "sources": [source.strip() for source in str(row.get("sources", "")).split(",") if source.strip()],
         "documents": documents[:100],
@@ -1332,18 +1481,42 @@ def export_excel(params: dict[str, list[str]]) -> tuple[bytes, str]:
         details: list[dict] = []
         date_label = f"{result['base']} - {result['target']}"
         totals = {metric: sum(float(row.get("metrics", {}).get(metric, {}).get("target") or 0) for row in rows) for metric in selected_metrics(params)}
+        summary = result.get("compare_insights") or {"title": "Что изменилось", "severity": "normal", "bullets": [], "top_risks": []}
     else:
         result = query_as_of(params)
         rows = result["rows"]
         details = result["details"]
         date_label = result["date"]
         totals = result["totals"]
+        summary = result.get("attention_summary") or attention_summary(result, template, date_label)
 
     wb = Workbook()
     ws = wb.active
-    ws.title = "Итоги"
+    ws.title = "Выводы"
     pipeline = row_pipeline(totals)
     problem_count = sum(1 for row in rows if row.get("problem_reasons"))
+    ws.append(["Отчет", TEMPLATES.get(template, TEMPLATES["all"])["label"]])
+    ws.append(["Дата отчета", date_label])
+    ws.append(["Готовый отчет", TEMPLATES.get(template, TEMPLATES["all"])["label"]])
+    ws.append(["Общий статус", summary.get("severity", "")])
+    ws.append([])
+    ws.append(["Что требует внимания"])
+    for bullet in summary.get("bullets") or []:
+        ws.append([bullet])
+    top_risks = summary.get("top_risks") or summary.get("new_problem_objects") or summary.get("worsened_objects") or []
+    ws.append([])
+    ws.append(["Топ-5 рисков"])
+    ws.append(["Объект", "Риск", "План", "Касса", "Причины"])
+    for item in top_risks[:5]:
+        ws.append([
+            item.get("object_name", ""),
+            f"{item.get('risk_label', '')} {item.get('risk_score', '')}".strip(),
+            item.get("plan", 0),
+            item.get("cash", 0),
+            ", ".join(item.get("reasons") or []),
+        ])
+
+    ws = wb.create_sheet("Итоги")
     summary_rows = [
         ("Дата отчета", date_label),
         ("Готовый отчет", TEMPLATES.get(template, TEMPLATES["all"])["label"]),
@@ -1359,7 +1532,7 @@ def export_excel(params: dict[str, list[str]]) -> tuple[bytes, str]:
         ws.append(list(item))
 
     objects_ws = wb.create_sheet("Объекты")
-    objects_ws.append(["Объект", "Код", "Бюджет", "План", "Документы", "Оплачено", "Касса", "Статус", "Причины", "Источники"])
+    objects_ws.append(["Объект", "Код", "Бюджет", "План", "Документы", "Оплачено", "Касса", "Статус", "Риск", "Балл риска", "Причины риска", "Источники"])
     for row in rows:
         pipeline = row.get("pipeline") or row_pipeline(row)
         objects_ws.append([
@@ -1371,17 +1544,26 @@ def export_excel(params: dict[str, list[str]]) -> tuple[bytes, str]:
             pipeline.get("paid", 0),
             pipeline.get("cash", 0),
             row.get("status", ""),
-            ", ".join(row.get("problem_reasons") or []),
+            row.get("risk_label", ""),
+            row.get("risk_score", 0),
+            ", ".join(row.get("risk_explanation") or []),
             row.get("sources", ""),
         ])
 
     problems_ws = wb.create_sheet("Проблемы")
-    problems_ws.append(["Причина", "Объект", "Код", "План", "Документы", "Оплачено", "Касса", "Источники"])
-    for row in rows:
+    problems_ws.append(["Причина", "Риск", "Балл риска", "Объект", "Код", "План", "Документы", "Оплачено", "Касса", "Источники"])
+    problem_rows = sorted(
+        [row for row in rows if row.get("problem_reasons")],
+        key=lambda item: (int(item.get("risk_score") or 0), float((item.get("pipeline") or row_pipeline(item)).get("plan") or 0)),
+        reverse=True,
+    )
+    for row in problem_rows:
         pipeline = row.get("pipeline") or row_pipeline(row)
         for reason in row.get("problem_reasons") or []:
             problems_ws.append([
                 reason,
+                row.get("risk_label", ""),
+                row.get("risk_score", 0),
                 row.get("object_name", ""),
                 row.get("object_code", ""),
                 pipeline.get("plan", 0),
@@ -1434,6 +1616,94 @@ def export_excel(params: dict[str, list[str]]) -> tuple[bytes, str]:
     return buffer.getvalue(), filename
 
 
+def compare_object_summary(row: dict, risk_value: int | None = None, base_row: dict | None = None) -> dict:
+    pipeline = row.get("pipeline") or row_pipeline(row)
+    score = int(risk_value if risk_value is not None else row.get("risk_score") or 0)
+    payload = {
+        "object_key": row.get("object_key", ""),
+        "object_name": row.get("object_name") or row.get("object_code") or "Объект без названия",
+        "object_code": row.get("object_code", ""),
+        "budget": row.get("budget", ""),
+        "risk_score": score,
+        "risk_label": risk_label(risk_level(score)),
+        "plan": float(pipeline.get("plan") or 0),
+        "cash": float(pipeline.get("cash") or 0),
+        "reasons": row.get("risk_explanation") or risk_explanation(row),
+    }
+    if base_row is not None:
+        base_pipeline = base_row.get("pipeline") or row_pipeline(base_row)
+        payload["risk_delta"] = score - int(base_row.get("risk_score") or 0)
+        payload["plan_delta"] = float(pipeline.get("plan") or 0) - float(base_pipeline.get("plan") or 0)
+        payload["cash_delta"] = float(pipeline.get("cash") or 0) - float(base_pipeline.get("cash") or 0)
+    return payload
+
+
+def compare_insights(base_rows: list[dict], target_rows: list[dict]) -> dict:
+    base_by_key = {row.get("object_key") or object_group_key(row): row for row in base_rows}
+    target_by_key = {row.get("object_key") or object_group_key(row): row for row in target_rows}
+    new_problem_objects = []
+    resolved_problem_objects = []
+    worsened_objects = []
+    improved_objects = []
+    stalled_cash_objects = []
+    for key in sorted(set(base_by_key) | set(target_by_key)):
+        base_row = base_by_key.get(key) or {"object_key": key, "risk_score": 0, "pipeline": row_pipeline({})}
+        target_row = target_by_key.get(key) or {"object_key": key, "risk_score": 0, "pipeline": row_pipeline({})}
+        base_score = int(base_row.get("risk_score") or 0)
+        target_score = int(target_row.get("risk_score") or 0)
+        base_pipeline = base_row.get("pipeline") or row_pipeline(base_row)
+        target_pipeline = target_row.get("pipeline") or row_pipeline(target_row)
+        display_row = target_row if key in target_by_key else base_row
+        if base_score < 25 <= target_score:
+            new_problem_objects.append(compare_object_summary(display_row, target_score, base_row if key in base_by_key else None))
+        if base_score >= 25 > target_score:
+            resolved_problem_objects.append(compare_object_summary(display_row, target_score, base_row if key in base_by_key else None))
+        if target_score - base_score >= 20:
+            worsened_objects.append(compare_object_summary(display_row, target_score, base_row if key in base_by_key else None))
+        if base_score - target_score >= 20:
+            improved_objects.append(compare_object_summary(display_row, target_score, base_row if key in base_by_key else None))
+        if float(target_pipeline.get("plan") or 0) > float(base_pipeline.get("plan") or 0) and float(target_pipeline.get("cash") or 0) == float(base_pipeline.get("cash") or 0):
+            stalled_cash_objects.append(compare_object_summary(display_row, target_score, base_row if key in base_by_key else None))
+
+    sort_key = lambda item: (int(item.get("risk_score") or 0), float(item.get("plan") or 0))
+    new_problem_objects = sorted(new_problem_objects, key=sort_key, reverse=True)[:10]
+    resolved_problem_objects = sorted(resolved_problem_objects, key=sort_key, reverse=True)[:10]
+    worsened_objects = sorted(worsened_objects, key=lambda item: (int(item.get("risk_delta") or 0), int(item.get("risk_score") or 0)), reverse=True)[:10]
+    improved_objects = sorted(improved_objects, key=lambda item: (abs(int(item.get("risk_delta") or 0)), float(item.get("plan") or 0)), reverse=True)[:10]
+    stalled_cash_objects = sorted(stalled_cash_objects, key=lambda item: float(item.get("plan_delta") or 0), reverse=True)[:10]
+
+    base_cash = sum(float((row.get("pipeline") or row_pipeline(row)).get("cash") or 0) for row in base_rows)
+    target_cash = sum(float((row.get("pipeline") or row_pipeline(row)).get("cash") or 0) for row in target_rows)
+    cash_delta = target_cash - base_cash
+    bullets = []
+    if new_problem_objects:
+        bullets.append(f"Появилось {len(new_problem_objects)} новых проблемных объектов.")
+    if resolved_problem_objects:
+        bullets.append(f"По {len(resolved_problem_objects)} объектам проблема ушла.")
+    if improved_objects:
+        bullets.append(f"У {len(improved_objects)} объектов риск снизился.")
+    if worsened_objects:
+        bullets.append(f"У {len(worsened_objects)} объектов риск вырос.")
+    if cash_delta:
+        direction = "выросла" if cash_delta > 0 else "снизилась"
+        bullets.append(f"Касса {direction} на {abs(cash_delta):,.0f}.".replace(",", " "))
+    if stalled_cash_objects:
+        bullets.append(f"Есть {len(stalled_cash_objects)} объектов, где план вырос, а касса не изменилась.")
+    if not bullets:
+        bullets.append("Существенных ухудшений или улучшений по риску не видно.")
+    severity = "danger" if new_problem_objects or worsened_objects else "warning" if stalled_cash_objects else "normal"
+    return {
+        "title": "Что изменилось",
+        "severity": severity,
+        "bullets": bullets[:5],
+        "new_problem_objects": new_problem_objects,
+        "resolved_problem_objects": resolved_problem_objects,
+        "worsened_objects": worsened_objects,
+        "improved_objects": improved_objects,
+        "stalled_cash_objects": stalled_cash_objects,
+    }
+
+
 def compare_periods(params: dict[str, list[str]]) -> dict:
     base = params.get("base", [""])[0].strip()
     target = params.get("target", [""])[0].strip()
@@ -1444,6 +1714,7 @@ def compare_periods(params: dict[str, list[str]]) -> dict:
     metrics = selected_metrics(params)
     base_rows = aggregate(select_as_of(STORE.records, base, params), metrics)["rows"]
     target_rows = aggregate(select_as_of(STORE.records, target, params), metrics)["rows"]
+    insights = compare_insights(base_rows, target_rows)
     by_key: dict[tuple[str, str], dict] = {}
     for label, rows in (("base", base_rows), ("target", target_rows)):
         for row in rows:
@@ -1456,11 +1727,13 @@ def compare_periods(params: dict[str, list[str]]) -> dict:
                     "object_name": row.get("object_name", ""),
                     "budget": row.get("budget", ""),
                     "sources": row.get("sources", ""),
+                    "risk": {"base": 0, "target": 0, "delta": 0},
                     "metrics": {metric: {"base": 0.0, "target": 0.0, "delta": 0.0, "delta_percent": None} for metric in metrics},
                 },
             )
             if row.get("sources"):
                 item["sources"] = row["sources"]
+            item["risk"][label] = int(row.get("risk_score") or 0)
             for metric in metrics:
                 item["metrics"][metric][label] = row.get(metric, 0.0)
     rows = []
@@ -1471,6 +1744,7 @@ def compare_periods(params: dict[str, list[str]]) -> dict:
             values["delta"] = values["target"] - values["base"]
             values["delta_percent"] = (values["delta"] / values["base"] * 100.0) if values["base"] else None
             total_delta += abs(values["delta"])
+        item["risk"]["delta"] = item["risk"]["target"] - item["risk"]["base"]
         item["total_delta"] = total_delta
         rows.append(item)
     rows.sort(key=lambda item: item["total_delta"], reverse=True)
@@ -1481,6 +1755,7 @@ def compare_periods(params: dict[str, list[str]]) -> dict:
         "semantics": AS_OF_SEMANTICS,
         "metrics": metrics,
         "available_dates": STORE.meta["reporting_dates"],
+        "compare_insights": insights,
         "rows": rows[:300],
     }
 

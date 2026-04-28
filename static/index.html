@@ -187,6 +187,16 @@
           </div>
         </section>
 
+        <section v-if="mode === 'slice' && topRisks.length" class="top-risks">
+          <div class="section-kicker">Главные риски</div>
+          <div class="top-risk-list">
+            <button v-for="row in topRisks" :key="row.object_key" type="button" class="top-risk-item" @click="openObject(row)">
+              <strong>{{ row.object_name }}</strong>
+              <span>{{ row.risk_label }} · {{ formatMoney(row.plan) }}</span>
+            </button>
+          </div>
+        </section>
+
         <nav ref="resultTabs" class="view-tabs" aria-label="Разделы">
           <button v-for="tab in viewTabs" :key="tab.code" type="button" :class="{ active: currentView === tab.code }" @click="setView(tab.code)">
             <span>{{ tab.label }}</span>
@@ -253,11 +263,12 @@
                   <th class="number">Оплачено</th>
                   <th class="number">Касса</th>
                   <th>Статус</th>
+                  <th>Риск</th>
                   <th></th>
                 </tr>
               </thead>
               <tbody>
-                <tr v-if="loading.query" class="loading-row"><td colspan="7">Загрузка...</td></tr>
+                <tr v-if="loading.query" class="loading-row"><td colspan="8">Загрузка...</td></tr>
                 <template v-else>
                   <template v-for="row in simpleRows" :key="row.rowKey">
                   <tr>
@@ -273,13 +284,14 @@
                       <span class="status-pill" :class="row.statusClass">{{ row.statusLabel }}</span>
                       <small v-if="row.match_confidence !== 'high'" class="muted-line">Возможна неполная связка источников</small>
                     </td>
+                    <td><span class="risk-pill" :class="row.riskClass">{{ row.riskLabel }} · {{ row.riskScore }}</span></td>
                     <td class="row-actions">
                       <button type="button" class="ghost compact-button" @click="openObject(row)">Открыть</button>
                       <button type="button" class="icon-only" @click="togglePipeline(row)" title="Цепочка денег">↔</button>
                     </td>
                   </tr>
                   <tr v-if="expandedPipelines[row.rowKey]" class="pipeline-row">
-                    <td colspan="7">
+                    <td colspan="8">
                       <div class="pipeline-line">
                         <span>План {{ formatMoney(row.pipeline.plan) }}</span>
                         <span>Документы {{ formatMoney(row.pipeline.documents) }}</span>
@@ -303,6 +315,9 @@
                 <p>{{ problemRows.length }} объектов</p>
               </div>
               <div class="problem-actions">
+                <button type="button" class="ghost" :class="{ active: problemRiskFilter === 'critical' }" @click="setProblemRiskFilter('critical')">Критичные</button>
+                <button type="button" class="ghost" :class="{ active: problemRiskFilter === 'high' }" @click="setProblemRiskFilter('high')">Высокие</button>
+                <button type="button" class="ghost" :class="{ active: problemRiskFilter === 'all' }" @click="setProblemRiskFilter('all')">Все</button>
                 <button type="button" class="ghost" @click="applyProblemFilter('no_documents')">Нет документов</button>
                 <button type="button" class="ghost" @click="applyProblemFilter('no_payments')">Нет оплат</button>
                 <button type="button" class="ghost" @click="applyProblemFilter('no_cash')">Нет кассы</button>
@@ -318,7 +333,7 @@
                 <h4>{{ group.label }} · {{ group.rows.length }}</h4>
                 <div v-for="row in group.rows.slice(0, 20)" :key="group.reason + row.rowKey" class="problem-item">
                   <strong>{{ row.object_name || row.object_code }}</strong>
-                  <span>{{ formatMoney(row.plan) }} план · {{ formatMoney(row.cash) }} касса</span>
+                  <span><span class="risk-text" :class="row.riskClass">{{ row.riskLabel }} · {{ row.riskScore }}</span> · {{ formatMoney(row.plan) }} план · {{ formatMoney(row.cash) }} касса</span>
                   <button type="button" class="ghost compact-button" @click="openObject(row)">Открыть</button>
                 </div>
               </section>
@@ -338,7 +353,16 @@
             <p>Попробуйте расширить выборку.</p>
             <button v-for="item in emptyStateSuggestions" :key="item.label" type="button" class="ghost" @click="applyEmptySuggestion(item)">{{ item.label }}</button>
           </div>
-          <div v-else class="table-wrap">
+          <div v-if="compareInsightSections.length" class="compare-insights">
+            <section v-for="section in compareInsightSections" :key="section.code" class="compare-insight-section">
+              <h4>{{ section.title }}</h4>
+              <button v-for="row in section.rows.slice(0, 5)" :key="section.code + row.object_key" type="button" class="compare-insight-item" @click="openObject(row)">
+                <strong>{{ row.object_name }}</strong>
+                <span>{{ row.risk_label }} · {{ formatMoney(row.plan) }}</span>
+              </button>
+            </section>
+          </div>
+          <div v-if="compare.rows.length || loading.compare" class="table-wrap">
             <table>
               <thead>
                 <tr>
@@ -428,11 +452,12 @@
           <button type="button" class="icon-only" @click="$refs.objectDialog.close()" title="Закрыть">×</button>
         </div>
         <div v-if="loading.object" class="skeleton">Загрузка карточки...</div>
-        <div v-else-if="objectCard" class="object-card-body">
-          <div class="object-summary">
-            <span class="status-pill" :class="rowStatusClass(rowStatus(objectCard))">{{ rowStatusLabel(rowStatus(objectCard)) }}</span>
-            <span v-for="source in objectCard.sources" :key="source" class="pill muted">{{ source }}</span>
-          </div>
+          <div v-else-if="objectCard" class="object-card-body">
+            <div class="object-summary">
+              <span class="status-pill" :class="rowStatusClass(rowStatus(objectCard))">{{ rowStatusLabel(rowStatus(objectCard)) }}</span>
+              <span class="risk-pill" :class="riskClass(objectCard.risk_level)">{{ objectCard.risk_label }} · {{ objectCard.risk_score }}</span>
+              <span v-for="source in objectCard.sources" :key="source" class="pill muted">{{ source }}</span>
+            </div>
           <div class="pipeline-line">
             <span>План {{ formatMoney(objectCard.pipeline?.plan) }}</span>
             <span>Документы {{ formatMoney(objectCard.pipeline?.documents) }}</span>

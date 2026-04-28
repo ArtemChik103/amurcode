@@ -170,14 +170,41 @@ class PlaywrightUiTests(unittest.TestCase):
         self.page.get_by_text("Я понял запрос").wait_for(timeout=10000)
         self.click_button("Показать результат")
         self.page.wait_for_url(lambda url: True, timeout=1000)
-        filtered_title = self.page.locator(".answer-card h3").inner_text()
+        filtered_summary = self.page.locator(".answer-card").inner_text()
 
         self.click_button("Собрать отчет СКК")
         self.page.wait_for_timeout(700)
-        full_title = self.page.locator(".answer-card h3").inner_text()
+        full_summary = self.page.locator(".answer-card").inner_text()
 
-        self.assertNotEqual(filtered_title, full_title)
-        self.assertIn("найдено", full_title.lower())
+        self.assertNotEqual(filtered_summary, full_summary)
+        self.assertIn("Что требует внимания", full_summary)
+
+    def test_attention_summary_and_top_risks_are_visible(self):
+        self.click_button("Проблемные СКК")
+        self.page.get_by_text("Что требует внимания").wait_for(timeout=10000)
+        self.page.get_by_text("Главные риски").wait_for(timeout=10000)
+        body = self.page.locator("body").inner_text()
+        self.assertNotIn("problem_reasons", body)
+        self.assertNotIn("pipeline", body)
+
+    def test_problem_rows_show_risk(self):
+        self.click_button("Проблемные СКК")
+        self.click_button("Проблемы")
+        self.page.get_by_text(re.compile("Критичный|Высокий|Средний")).first.wait_for(timeout=10000)
+
+    def test_top_risk_opens_object_card(self):
+        self.click_button("Проблемные СКК")
+        self.page.locator(".top-risk-item").first.click()
+        self.page.get_by_role("heading", name="Документы").wait_for(timeout=10000)
+        self.page.get_by_text(re.compile("Критичный|Высокий|Средний|Низкий")).first.wait_for(timeout=10000)
+        self.page.get_by_text("План", exact=False).first.wait_for(timeout=10000)
+
+    def test_compare_insights_visible(self):
+        self.click_button("Сравнить две даты")
+        self.page.get_by_text("Что изменилось").first.wait_for(timeout=10000)
+        body = self.page.locator("body").inner_text()
+        self.assertNotIn("problem_reasons", body)
+        self.assertNotIn("pipeline", body)
 
     def test_tabs_trace_readiness_empty_state_and_export(self):
         self.click_button("Собрать отчет СКК")

@@ -441,7 +441,8 @@ label span,
 .quick-start,
 .smart-search,
 .assistant-card,
-.answer-card {
+.answer-card,
+.top-risks {
   margin: 18px 30px 0;
   padding: 16px;
   border: 1px solid var(--line);
@@ -565,6 +566,51 @@ label span,
 .answer-card.empty {
   border-color: color-mix(in srgb, var(--danger) 36%, transparent);
   background: color-mix(in srgb, var(--danger) 8%, var(--panel));
+}
+
+.top-risk-list,
+.compare-insights {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 10px;
+}
+
+.top-risk-item,
+.compare-insight-item {
+  display: grid;
+  gap: 5px;
+  min-height: 66px;
+  padding: 10px 12px;
+  text-align: left;
+  border-color: color-mix(in srgb, var(--danger) 28%, var(--line));
+  background: var(--panel-soft);
+}
+
+.top-risk-item strong,
+.compare-insight-item strong {
+  color: var(--heading);
+}
+
+.top-risk-item span,
+.compare-insight-item span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.compare-insights {
+  padding: 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.compare-insight-section {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+.compare-insight-section h4 {
+  margin: 0;
+  color: var(--heading);
 }
 
 .view-tabs button {
@@ -840,8 +886,50 @@ th.number {
   color: var(--muted);
 }
 
+.risk-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.risk-pill.danger,
+.risk-text.danger {
+  border-color: color-mix(in srgb, var(--danger) 44%, transparent);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
+}
+
+.risk-pill.high,
+.risk-text.high {
+  border-color: color-mix(in srgb, #fb923c 44%, transparent);
+  background: color-mix(in srgb, #fb923c 12%, transparent);
+  color: #fb923c;
+}
+
+.risk-pill.warning,
+.risk-text.warning {
+  border-color: color-mix(in srgb, var(--warn) 44%, transparent);
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  color: var(--warn);
+}
+
+.risk-pill.neutral,
+.risk-text.neutral {
+  color: var(--muted);
+}
+
+.risk-text {
+  font-weight: 800;
+}
+
 .simple-table table {
-  min-width: 920px;
+  min-width: 1040px;
 }
 
 .pipeline-row td {
@@ -867,6 +955,12 @@ th.number {
   flex-wrap: wrap;
   gap: 8px;
   justify-content: flex-end;
+}
+
+.problem-actions .active {
+  border-color: color-mix(in srgb, var(--accent) 48%, transparent);
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .problem-groups {

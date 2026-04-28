@@ -138,6 +138,7 @@ createApp({
       expandedPipelines: {},
       objectCard: null,
       objectRowsOpen: false,
+      problemRiskFilter: "all",
     };
   },
 
@@ -205,12 +206,22 @@ createApp({
           status,
           statusLabel: this.rowStatusLabel(status),
           statusClass: this.rowStatusClass(status),
+          riskLabel: row.risk_label || this.riskLabel(row.risk_level),
+          riskScore: Number(row.risk_score || 0),
+          riskClass: this.riskClass(row.risk_level),
         };
       });
     },
 
     problemRows() {
-      return this.simpleRows.filter((row) => (row.problem_reasons || []).length);
+      return this.simpleRows
+        .filter((row) => (row.problem_reasons || []).length)
+        .filter((row) => {
+          if (this.problemRiskFilter === "critical") return row.risk_level === "critical";
+          if (this.problemRiskFilter === "high") return ["critical", "high"].includes(row.risk_level);
+          return true;
+        })
+        .sort((left, right) => (Number(right.risk_score || 0) - Number(left.risk_score || 0)) || (Number(right.plan || 0) - Number(left.plan || 0)));
     },
 
     problemGroups() {
@@ -221,7 +232,14 @@ createApp({
           groups[reason].rows.push(row);
         });
       });
-      return Object.values(groups);
+      return Object.values(groups).map((group) => ({
+        ...group,
+        rows: group.rows.sort((left, right) => (Number(right.risk_score || 0) - Number(left.risk_score || 0)) || (Number(right.plan || 0) - Number(left.plan || 0))),
+      }));
+    },
+
+    topRisks() {
+      return this.query.attention_summary?.top_risks || [];
     },
 
     reportingDates() {
@@ -257,6 +275,13 @@ createApp({
           severity: "empty",
         };
       }
+      if (this.query.attention_summary) {
+        return {
+          title: this.query.attention_summary.title,
+          bullets: this.query.attention_summary.bullets || [],
+          severity: this.query.attention_summary.severity || "normal",
+        };
+      }
       const totals = this.query.totals || {};
       const topRow = this.query.rows[0];
       const pipeline = this.simpleTotals;
@@ -269,6 +294,13 @@ createApp({
     },
 
     compareNarrative() {
+      if (this.compare.compare_insights) {
+        return {
+          title: this.compare.compare_insights.title,
+          bullets: this.compare.compare_insights.bullets || [],
+          severity: this.compare.compare_insights.severity || "normal",
+        };
+      }
       if (!this.compare.rows.length) {
         return {
           title: "Изменений не найдено",
@@ -284,6 +316,16 @@ createApp({
       const top = this.compare.rows[0];
       bullets.push(`Самое большое изменение: ${top.object_name || top.object_code || "без названия"}`);
       return { title: `Изменения за период ${this.filters.base} - ${this.filters.target}`, bullets, severity: "normal" };
+    },
+
+    compareInsightSections() {
+      const insights = this.compare.compare_insights || {};
+      return [
+        { code: "new_problem_objects", title: "Новые проблемы", rows: insights.new_problem_objects || [] },
+        { code: "improved_objects", title: "Риск снизился", rows: insights.improved_objects || [] },
+        { code: "worsened_objects", title: "Риск вырос", rows: insights.worsened_objects || [] },
+        { code: "stalled_cash_objects", title: "План вырос, касса не изменилась", rows: insights.stalled_cash_objects || [] },
+      ].filter((section) => section.rows.length);
     },
 
     emptyStateSuggestions() {
@@ -619,7 +661,7 @@ createApp({
           this.currentView = "changes";
         } else {
           this.filters.date = action.date || this.filters.date || this.activeDateValues.at(-1) || "";
-          this.currentView = action.post_filter ? "problems" : "overview";
+          this.currentView = action.open_view || (action.post_filter ? "problems" : "overview");
         }
       }, shouldScroll);
     },
@@ -632,6 +674,10 @@ createApp({
 
     applyProblemFilter(postFilter) {
       return this.applyAction({ mode: "slice", post_filter: postFilter, metrics: ["limit", "obligation", "cash", "agreement", "contract", "payment", "buau"] }, { scrollToResults: true });
+    },
+
+    setProblemRiskFilter(filter) {
+      this.problemRiskFilter = filter;
     },
 
     scheduleLoad() {
@@ -769,7 +815,7 @@ createApp({
       this.$refs.objectDialog?.showModal();
       try {
         const params = new URLSearchParams();
-        params.set("date", this.filters.date);
+        params.set("date", this.mode === "compare" ? this.filters.target : this.filters.date);
         params.set("template", this.filters.template);
         params.set("object_key", row.object_key);
         if (row.budget) params.set("budget", row.budget);
@@ -893,6 +939,24 @@ createApp({
         low_cash: "Низкая касса",
         data_gap: "Разрыв данных",
       }[reason] || "Проблема данных";
+    },
+
+    riskLabel(level) {
+      return {
+        critical: "Критичный",
+        high: "Высокий",
+        medium: "Средний",
+        low: "Низкий",
+      }[level] || "Низкий";
+    },
+
+    riskClass(level) {
+      return {
+        critical: "danger",
+        high: "high",
+        medium: "warning",
+        low: "neutral",
+      }[level] || "neutral";
     },
 
     hasSource(fragment) {
