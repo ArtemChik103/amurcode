@@ -19,6 +19,16 @@
     </header>
 
     <main>
+      <section class="status" aria-label="Статус загрузки">
+        <span id="loadStatus">Загрузка данных...</span>
+        <span id="qualityStatus"></span>
+      </section>
+
+      <section class="modebar" aria-label="Режим">
+        <button id="sliceMode" class="active" type="button">Срез</button>
+        <button id="compareMode" type="button">Сравнение</button>
+      </section>
+
       <section class="filters" aria-label="Фильтры">
         <label>
           <span>Поиск</span>
@@ -29,6 +39,10 @@
           <input id="code" type="search" placeholder="970, 6105, КЦСР" />
         </label>
         <label>
+          <span>Шаблон</span>
+          <select id="template"></select>
+        </label>
+        <label>
           <span>Бюджет</span>
           <select id="budget"></select>
         </label>
@@ -36,76 +50,60 @@
           <span>Источник</span>
           <select id="source"></select>
         </label>
-        <label>
+        <label class="slice-only">
           <span>С</span>
           <input id="start" type="date" />
         </label>
-        <label>
+        <label class="slice-only">
           <span>По</span>
           <input id="end" type="date" />
         </label>
-        <button id="reset" class="secondary" title="Сбросить фильтры" aria-label="Сбросить">↺</button>
+        <label class="compare-only hidden">
+          <span>База</span>
+          <select id="baseDate"></select>
+        </label>
+        <label class="compare-only hidden">
+          <span>Цель</span>
+          <select id="targetDate"></select>
+        </label>
+        <button id="reset" class="secondary" type="button" title="Сбросить фильтры" aria-label="Сбросить">↺</button>
       </section>
 
-      <section class="kpis" aria-label="Показатели">
-        <article>
-          <span>Лимиты</span>
-          <strong id="limit">0</strong>
-        </article>
-        <article>
-          <span>Бюджетные обязательства</span>
-          <strong id="obligation">0</strong>
-        </article>
-        <article>
-          <span>Касса</span>
-          <strong id="cash">0</strong>
-        </article>
-        <article>
-          <span>Соглашения</span>
-          <strong id="agreement">0</strong>
-        </article>
-        <article>
-          <span>Контракты и платежи</span>
-          <strong id="procurement">0</strong>
-        </article>
-        <article>
-          <span>БУ/АУ выплаты</span>
-          <strong id="buau">0</strong>
-        </article>
-      </section>
+      <section class="metric-filter" aria-label="Метрики" id="metricFilter"></section>
+
+      <section class="kpis" aria-label="Показатели" id="kpis"></section>
 
       <section class="workspace">
-        <div class="panel chart-panel">
+        <div class="panel chart-panel slice-panel">
           <div class="panel-head">
-            <h2>Динамика</h2>
+            <h2 id="resultTitle">Динамика</h2>
             <span id="recordCount"></span>
           </div>
           <canvas id="chart" height="260"></canvas>
         </div>
 
-        <div class="panel">
+        <div class="panel slice-panel">
           <div class="panel-head">
             <h2>Сводная таблица</h2>
             <span id="rowCount"></span>
           </div>
           <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Код</th>
-                  <th>Объект</th>
-                  <th>Бюджет</th>
-                  <th>Источники</th>
-                  <th>Лимиты</th>
-                  <th>БО</th>
-                  <th>Касса</th>
-                  <th>Соглашения</th>
-                  <th>Контракты</th>
-                  <th>Платежи</th>
-                  <th>БУ/АУ</th>
-                </tr>
-              </thead>
+            <table id="summaryTable">
+              <thead id="summaryHead"></thead>
               <tbody id="summaryBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="panel compare-panel hidden">
+          <div class="panel-head">
+            <h2>Сравнение периодов</h2>
+            <span id="compareCount"></span>
+          </div>
+          <div class="table-wrap">
+            <table id="compareTable">
+              <thead id="compareHead"></thead>
+              <tbody id="compareBody"></tbody>
             </table>
           </div>
         </div>
@@ -125,7 +123,8 @@
                   <th>Объект</th>
                   <th>Документ</th>
                   <th>Контрагент</th>
-                  <th>Сумма</th>
+                  <th class="number">Сумма</th>
+                  <th>Trace</th>
                 </tr>
               </thead>
               <tbody id="detailBody"></tbody>
@@ -134,6 +133,14 @@
         </div>
       </section>
     </main>
+
+    <dialog id="traceDialog">
+      <div class="dialog-head">
+        <h2>Исходная строка</h2>
+        <button id="closeTrace" type="button" aria-label="Закрыть">×</button>
+      </div>
+      <pre id="traceBody"></pre>
+    </dialog>
 
     <script src="/static/app.js"></script>
   </body>
