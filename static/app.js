@@ -97,6 +97,13 @@ createApp({
         count: 0,
       },
 
+      readiness: {
+        date: "",
+        template: "",
+        summary: { ok: 0, warn: 0, bad: 0 },
+        checks: [],
+      },
+
       compare: {
         base: "",
         target: "",
@@ -119,6 +126,7 @@ createApp({
         query: false,
         compare: false,
         trace: false,
+        object: false,
       },
 
       error: "",
@@ -128,6 +136,8 @@ createApp({
       pendingResultScroll: false,
       suppressAutoLoad: false,
       expandedPipelines: {},
+      objectCard: null,
+      objectRowsOpen: false,
     };
   },
 
@@ -183,7 +193,7 @@ createApp({
       return (this.query.rows || []).map((row) => {
         const pipeline = row.pipeline || this.buildPipeline(row);
         const status = this.rowStatus(row);
-        const key = `${row.object_code || row.object_name}-${row.budget || ""}`;
+        const key = row.object_key || `${row.object_code || row.object_name}-${row.budget || ""}`;
         return {
           ...row,
           rowKey: key,
@@ -292,16 +302,7 @@ createApp({
     },
 
     demoReadiness() {
-      return [
-        { label: "Данные загружены", ok: this.meta.records > 0 },
-        { label: "Есть РЧБ", ok: this.hasSource("РЧБ") },
-        { label: "Есть соглашения", ok: this.hasSource("Соглаш") },
-        { label: "Есть ГЗ", ok: this.hasSource("ГЗ") },
-        { label: "Есть БУАУ", ok: this.hasSource("БУАУ") },
-        { label: "Выборка не пустая", ok: this.mode === "compare" ? this.compare.rows.length > 0 : this.query.rows.length > 0 },
-        { label: "Источник цифры доступен", ok: (this.query.details || []).some((row) => row.id) },
-        { label: "Ошибок загрузки нет", ok: !this.quality.summary.errors },
-      ];
+      return this.readiness.checks || [];
     },
   },
 
@@ -392,7 +393,12 @@ createApp({
       this.error = "";
       try {
         const params = this.buildQueryParams(true);
-        this.query = await fetchJson(`/api/query?${params.toString()}`);
+        const [query, readiness] = await Promise.all([
+          fetchJson(`/api/query?${params.toString()}`),
+          fetchJson(`/api/readiness?${params.toString()}`),
+        ]);
+        this.query = query;
+        this.readiness = readiness;
         await nextTick();
         this.drawChart();
         await this.scrollToResultsIfNeeded();
@@ -753,6 +759,39 @@ createApp({
       } finally {
         this.loading.trace = false;
       }
+    },
+
+    async openObject(row) {
+      if (!row?.object_key) return;
+      this.loading.object = true;
+      this.objectRowsOpen = false;
+      this.objectCard = null;
+      this.$refs.objectDialog?.showModal();
+      try {
+        const params = new URLSearchParams();
+        params.set("date", this.filters.date);
+        params.set("template", this.filters.template);
+        params.set("object_key", row.object_key);
+        if (row.budget) params.set("budget", row.budget);
+        this.objectCard = await fetchJson(`/api/object?${params.toString()}`);
+      } catch (error) {
+        console.error(error);
+        this.error = "Не удалось открыть карточку объекта.";
+      } finally {
+        this.loading.object = false;
+      }
+    },
+
+    exportExcel() {
+      const params = this.buildQueryParams(this.mode !== "compare");
+      if (this.mode === "compare") {
+        params.set("mode", "compare");
+        if (this.filters.base) params.set("base", this.filters.base);
+        if (this.filters.target) params.set("target", this.filters.target);
+      } else if (this.filters.date) {
+        params.set("date", this.filters.date);
+      }
+      window.location.href = `/api/export.xlsx?${params.toString()}`;
     },
 
     exportCsv() {

@@ -182,12 +182,20 @@ class PlaywrightUiTests(unittest.TestCase):
     def test_tabs_trace_readiness_empty_state_and_export(self):
         self.click_button("Собрать отчет СКК")
         self.click_button("Проверить перед показом")
-        self.page.get_by_text("Готовность демонстрации").wait_for(timeout=10000)
-        self.page.get_by_text("Данные загружены").wait_for(timeout=10000)
+        self.page.get_by_text("Готовность данных").wait_for(timeout=10000)
+        readiness = self.page.locator(".readiness-panel").inner_text()
+        self.assertIn("Плановые данные найдены", readiness)
+        self.assertNotIn("snapshot", readiness)
+        self.assertNotIn("trace", readiness)
+        self.assertNotIn("КЦСР", readiness)
 
         self.click_button("Объекты")
         self.page.get_by_text("Статус").wait_for(timeout=10000)
         self.page.locator(".status-pill").first.wait_for(timeout=10000)
+        self.page.locator(".simple-table button", has_text="Открыть").first.click()
+        self.page.get_by_text("Карточка объекта").or_(self.page.get_by_text("Документы")).first.wait_for(timeout=10000)
+        self.page.get_by_text("Откуда цифры").wait_for(timeout=10000)
+        self.page.get_by_role("button", name="×").click()
         self.page.locator("button[title='Цепочка денег']").first.click()
         self.page.get_by_text("План", exact=False).first.wait_for(timeout=10000)
 
@@ -218,6 +226,11 @@ class PlaywrightUiTests(unittest.TestCase):
             content = target.read_text(encoding="utf-8-sig")
         self.assertIn("Отчёт", content)
         self.assertIn("Показатели", content)
+
+        with self.page.expect_download() as excel_info:
+            self.click_button("Скачать Excel")
+        excel = excel_info.value
+        self.assertRegex(excel.suggested_filename, r"analytics_.*\.xlsx")
 
     def test_no_technical_words_on_primary_screen(self):
         body_text = self.page.locator("body").inner_text()

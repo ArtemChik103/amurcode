@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sys
+from io import BytesIO
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
@@ -80,6 +81,14 @@ QUICK_ACTIONS = {
         "template": "all",
         "metrics": ["limit", "cash", "payment", "buau"],
         "post_filter": "execution_problems",
+    },
+    "demo_skk_problems": {
+        "label": "Проблемные СКК",
+        "description": "Показать проблемные объекты СКК и источник цифр",
+        "mode": "slice",
+        "template": "skk",
+        "post_filter": "execution_problems",
+        "metrics": ["limit", "obligation", "cash", "agreement", "contract", "payment", "buau"],
     },
     "find_object": {
         "label": "Найти объект",
@@ -204,6 +213,26 @@ def normalize_code(value: object) -> str:
 
 def display_code(value: object) -> str:
     return str(value or "").strip()
+
+
+def find_header_value(row: dict[str, str], *prefixes: str) -> str:
+    for prefix in prefixes:
+        for key, value in row.items():
+            if str(key).strip().lower().startswith(prefix.lower()):
+                return value
+    return ""
+
+
+def normalize_name(value: object) -> str:
+    return " ".join(re.findall(r"[0-9A-Za-zА-Яа-яЁё]+", str(value or "").lower()))
+
+
+def object_group_key(record: dict) -> str:
+    budget_norm = normalize_name(record.get("budget"))
+    code_norm = normalize_code(record.get("object_code_norm") or record.get("object_code"))
+    if code_norm:
+        return f"{code_norm}|{budget_norm}"
+    return f"name:{normalize_name(record.get('object_name'))}|{budget_norm}"
 
 
 def make_record(records: list[dict], source_file: str, source_row: int, raw: dict, **fields: object) -> dict:
@@ -358,6 +387,7 @@ def enrich_records(records: list[dict]) -> None:
         record.setdefault("snapshot_source", "event")
         record.setdefault("amount_semantics", "event_amount")
         record.setdefault("raw", {key: value for key, value in record.items() if key not in {"raw"}})
+        record["object_key"] = object_group_key(record)
     for source, count in source_counts.items():
         LOAD_STATS[source or "unknown"] = {"read_rows": count, "records": count, "warnings": 0, "errors": 0}
 
@@ -427,9 +457,9 @@ def load_rcb(records: list[dict]) -> None:
                     counterparty=item.get("Наименование КВСР", "").strip(),
                     document_number="",
                     description=item.get("Наименование КВР", "").strip(),
-                    limit=parse_amount(item.get("Лимиты ПБС 2025 год")),
-                    obligation=parse_amount(item.get("Подтв. лимитов по БО 2025 год")),
-                    cash=parse_amount(item.get("Всего выбытий (бух.уч.)")),
+                    limit=parse_amount(find_header_value(item, "Лимиты ПБС"), source_file, row_number, "Лимиты ПБС"),
+                    obligation=parse_amount(find_header_value(item, "Подтв. лимитов по БО"), source_file, row_number, "Подтв. лимитов по БО"),
+                    cash=parse_amount(find_header_value(item, "Всего выбытий"), source_file, row_number, "Всего выбытий"),
                     agreement=0.0,
                     contract=0.0,
                     payment=0.0,
@@ -753,20 +783,21 @@ def row_status_from_reasons(reasons: list[str]) -> str:
 
 
 def aggregate(records: list[dict], metrics: list[str] | None = None) -> dict:
-    groups: dict[tuple[str, str], dict] = {}
+    groups: dict[str, dict] = {}
     timeline: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
     metric_keys = metrics or list(METRIC_KEYS)
 
     totals = {key: 0.0 for key in metric_keys}
     for record in records:
-        object_key = record.get("object_code_norm") or record.get("object_name", "").lower()
-        key = (object_key, record.get("budget") or "")
+        key = record.get("object_key") or object_group_key(record)
         row = groups.setdefault(
             key,
             {
+                "object_key": key,
                 "object_code": record.get("object_code") or "",
                 "object_name": record.get("object_name") or "",
-                "budget": key[1],
+                "budget": record.get("budget") or "",
+                "object_aliases": set(),
                 "sources": set(),
                 **{metric: 0.0 for metric in METRIC_KEYS},
             },
@@ -779,6 +810,8 @@ def aggregate(records: list[dict], metrics: list[str] | None = None) -> dict:
             and len(record["object_name"]) > len(row["object_name"])
         ):
             row["object_name"] = record["object_name"]
+        if record.get("object_name"):
+            row["object_aliases"].add(record["object_name"])
         row["sources"].add(record["source"])
         point = record.get("snapshot") or record.get("event_date") or "unknown"
         for metric in METRIC_KEYS:
@@ -793,6 +826,8 @@ def aggregate(records: list[dict], metrics: list[str] | None = None) -> dict:
     for row in groups.values():
         row["source_count"] = len(row["sources"])
         row["sources"] = ", ".join(sorted(row["sources"]))
+        row["object_aliases"] = sorted(row["object_aliases"])[:10]
+        row["match_confidence"] = "high" if not str(row["object_key"]).startswith("name:") else "medium"
         row["pipeline"] = row_pipeline(row)
         row["problem_reasons"] = problem_reasons(row)
         row["status"] = row_status_from_reasons(row["problem_reasons"])
@@ -1142,6 +1177,60 @@ AS_OF_SEMANTICS = {
 }
 
 
+def readiness_check(status: str, code: str, label: str, message: str) -> dict:
+    return {"code": code, "label": label, "status": status, "message": message}
+
+
+def readiness_summary(records: list[dict], rows: list[dict], params: dict[str, list[str]]) -> dict:
+    date = params.get("date", [""])[0].strip()
+    if not date:
+        dates = STORE.meta.get("reporting_dates", [])
+        date = dates[-1] if dates else ""
+    template = params.get("template", ["all"])[0].strip() or "all"
+    sources = {record.get("source") for record in records}
+    checks = [
+        readiness_check(
+            "ok" if "РЧБ" in sources else "bad",
+            "rcb_loaded",
+            "Плановые данные найдены",
+            "Есть строки РЧБ на выбранную дату" if "РЧБ" in sources else "Нет строк РЧБ на выбранную дату",
+        ),
+        readiness_check(
+            "ok" if "Соглашения" in sources else "warn",
+            "agreements_loaded",
+            "Соглашения найдены",
+            "Есть соглашения на выбранную дату" if "Соглашения" in sources else "Соглашения не попали в выборку",
+        ),
+        readiness_check(
+            "ok" if "ГЗ: контракты" in sources else "warn",
+            "contracts_loaded",
+            "Контракты найдены",
+            "Есть контракты на выбранную дату" if "ГЗ: контракты" in sources else "Контракты есть не по всем объектам",
+        ),
+        readiness_check(
+            "ok" if {"ГЗ: платежи", "БУАУ"} & sources else "warn",
+            "payments_loaded",
+            "Платежи найдены",
+            "Есть платежи до выбранной даты" if {"ГЗ: платежи", "БУАУ"} & sources else "Платежи не попали в выборку",
+        ),
+    ]
+    has_gaps = any("data_gap" in (row.get("problem_reasons") or []) for row in rows)
+    checks.append(
+        readiness_check(
+            "warn" if has_gaps else "ok",
+            "data_gaps",
+            "Разрывы данных",
+            "Есть объекты только в одном источнике" if has_gaps else "Критичных разрывов по источникам не видно",
+        )
+    )
+    if not rows:
+        checks.append(readiness_check("bad", "empty_result", "Выборка не пустая", "По выбранным условиям нет объектов"))
+    else:
+        checks.append(readiness_check("ok", "empty_result", "Выборка не пустая", "Есть объекты для показа"))
+    summary = {status: sum(1 for check in checks if check["status"] == status) for status in ("ok", "warn", "bad")}
+    return {"date": date, "template": template, "summary": summary, "checks": checks}
+
+
 def query_as_of(params: dict[str, list[str]]) -> dict:
     date = params.get("date", [""])[0].strip()
     if not date:
@@ -1159,6 +1248,176 @@ def query_as_of(params: dict[str, list[str]]) -> dict:
     }
 
 
+def readiness_response(params: dict[str, list[str]]) -> dict:
+    date = params.get("date", [""])[0].strip()
+    if not date:
+        dates = STORE.meta.get("reporting_dates", [])
+        date = dates[-1] if dates else ""
+        params = {**params, "date": [date]}
+    metrics = selected_metrics(params)
+    records = select_as_of(STORE.records, date, params)
+    result = aggregate(records, metrics)
+    result = apply_aggregate_post_filter(result, params.get("post_filter", [""])[0].strip(), metrics)
+    return readiness_summary(records, result["rows"], params)
+
+
+def object_detail(params: dict[str, list[str]]) -> dict:
+    object_key = params.get("object_key", [""])[0].strip()
+    if not object_key:
+        return {"error": "object_key_required"}
+    date = params.get("date", [""])[0].strip()
+    if not date:
+        dates = STORE.meta.get("reporting_dates", [])
+        date = dates[-1] if dates else ""
+    records = [record for record in select_as_of(STORE.records, date, params) if (record.get("object_key") or object_group_key(record)) == object_key]
+    result = aggregate(records)
+    if not result["rows"]:
+        return {"error": "object_not_found"}
+    row = result["rows"][0]
+    documents = []
+    for record in records:
+        if record.get("source") in {"Соглашения", "ГЗ: контракты", "ГЗ: платежи", "БУАУ"}:
+            amount = sum(float(record.get(metric) or 0) for metric in ("agreement", "contract", "payment", "buau"))
+            documents.append(
+                {
+                    "source": record.get("source", ""),
+                    "date": record.get("document_date") or record.get("event_date") or record.get("snapshot") or "",
+                    "number": record.get("document_number", ""),
+                    "counterparty": record.get("counterparty", ""),
+                    "amount": amount,
+                }
+            )
+    return {
+        "object_key": object_key,
+        "object_code": row.get("object_code", ""),
+        "object_name": row.get("object_name", ""),
+        "budget": row.get("budget", ""),
+        "status": row.get("status", ""),
+        "problem_reasons": row.get("problem_reasons", []),
+        "pipeline": row.get("pipeline", {}),
+        "sources": [source.strip() for source in str(row.get("sources", "")).split(",") if source.strip()],
+        "documents": documents[:100],
+        "records": records[:100],
+    }
+
+
+def export_excel(params: dict[str, list[str]]) -> tuple[bytes, str]:
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font
+    except ImportError as exc:
+        raise RuntimeError("excel_dependency_missing") from exc
+
+    mode = params.get("mode", ["slice"])[0].strip()
+    template = params.get("template", ["all"])[0].strip() or "all"
+    if mode == "compare":
+        result = compare_periods(params)
+        rows = result["rows"]
+        details: list[dict] = []
+        date_label = f"{result['base']} - {result['target']}"
+        totals = {metric: sum(float(row.get("metrics", {}).get(metric, {}).get("target") or 0) for row in rows) for metric in selected_metrics(params)}
+    else:
+        result = query_as_of(params)
+        rows = result["rows"]
+        details = result["details"]
+        date_label = result["date"]
+        totals = result["totals"]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Итоги"
+    pipeline = row_pipeline(totals)
+    problem_count = sum(1 for row in rows if row.get("problem_reasons"))
+    summary_rows = [
+        ("Дата отчета", date_label),
+        ("Готовый отчет", TEMPLATES.get(template, TEMPLATES["all"])["label"]),
+        ("Найдено объектов", len(rows)),
+        ("План", pipeline["plan"]),
+        ("Документы", pipeline["documents"]),
+        ("Оплачено", pipeline["paid"]),
+        ("Касса", pipeline["cash"]),
+        ("Проблемных объектов", problem_count),
+    ]
+    ws.append(["Показатель", "Значение"])
+    for item in summary_rows:
+        ws.append(list(item))
+
+    objects_ws = wb.create_sheet("Объекты")
+    objects_ws.append(["Объект", "Код", "Бюджет", "План", "Документы", "Оплачено", "Касса", "Статус", "Причины", "Источники"])
+    for row in rows:
+        pipeline = row.get("pipeline") or row_pipeline(row)
+        objects_ws.append([
+            row.get("object_name", ""),
+            row.get("object_code", ""),
+            row.get("budget", ""),
+            pipeline.get("plan", 0),
+            pipeline.get("documents", 0),
+            pipeline.get("paid", 0),
+            pipeline.get("cash", 0),
+            row.get("status", ""),
+            ", ".join(row.get("problem_reasons") or []),
+            row.get("sources", ""),
+        ])
+
+    problems_ws = wb.create_sheet("Проблемы")
+    problems_ws.append(["Причина", "Объект", "Код", "План", "Документы", "Оплачено", "Касса", "Источники"])
+    for row in rows:
+        pipeline = row.get("pipeline") or row_pipeline(row)
+        for reason in row.get("problem_reasons") or []:
+            problems_ws.append([
+                reason,
+                row.get("object_name", ""),
+                row.get("object_code", ""),
+                pipeline.get("plan", 0),
+                pipeline.get("documents", 0),
+                pipeline.get("paid", 0),
+                pipeline.get("cash", 0),
+                row.get("sources", ""),
+            ])
+
+    details_ws = wb.create_sheet("Исходные строки")
+    details_ws.append(["Дата", "Источник", "Файл", "Строка", "Код", "Объект", "Документ", "Контрагент", "Сумма"])
+    for record in details:
+        amount = sum(float(record.get(metric) or 0) for metric in METRIC_KEYS)
+        details_ws.append([
+            record.get("event_date") or record.get("snapshot") or "",
+            record.get("source", ""),
+            record.get("source_file", ""),
+            record.get("source_row", ""),
+            record.get("object_code", ""),
+            record.get("object_name", ""),
+            record.get("document_number", ""),
+            record.get("counterparty", ""),
+            amount,
+        ])
+
+    method_ws = wb.create_sheet("Методика")
+    for line in (
+        "РЧБ и соглашения берутся как последний месячный срез не позже выбранной даты.",
+        "Контракты, платежи и БУАУ учитываются накопительно до выбранной даты.",
+        "План = лимиты + БО.",
+        "Документы = соглашения + контракты.",
+        "Оплачено = платежи + БУАУ.",
+        "Касса = кассовые выплаты из РЧБ.",
+    ):
+        method_ws.append([line])
+
+    for sheet in wb.worksheets:
+        for cell in sheet[1]:
+            cell.font = Font(bold=True)
+        for column in sheet.columns:
+            width = min(55, max(12, *(len(str(cell.value or "")) + 2 for cell in column)))
+            sheet.column_dimensions[column[0].column_letter].width = width
+
+    buffer = BytesIO()
+    wb.save(buffer)
+    if mode == "compare":
+        filename = f"analytics_compare_{template}_{params.get('base', [''])[0]}_{params.get('target', [''])[0]}.xlsx"
+    else:
+        filename = f"analytics_{template}_{params.get('date', ['as_of'])[0] or 'as_of'}.xlsx"
+    return buffer.getvalue(), filename
+
+
 def compare_periods(params: dict[str, list[str]]) -> dict:
     base = params.get("base", [""])[0].strip()
     target = params.get("target", [""])[0].strip()
@@ -1172,10 +1431,11 @@ def compare_periods(params: dict[str, list[str]]) -> dict:
     by_key: dict[tuple[str, str], dict] = {}
     for label, rows in (("base", base_rows), ("target", target_rows)):
         for row in rows:
-            key = (row.get("object_code") or row.get("object_name", ""), row.get("budget", ""))
+            key = row.get("object_key") or object_group_key(row)
             item = by_key.setdefault(
                 key,
                 {
+                    "object_key": key,
                     "object_code": row.get("object_code", ""),
                     "object_name": row.get("object_name", ""),
                     "budget": row.get("budget", ""),
@@ -1241,6 +1501,27 @@ class Handler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/compare":
             self.write_json(compare_periods(parse_qs(parsed.query)))
             return
+        if parsed.path == "/api/readiness":
+            self.write_json(readiness_response(parse_qs(parsed.query)))
+            return
+        if parsed.path == "/api/object":
+            payload = object_detail(parse_qs(parsed.query))
+            self.write_json(payload, status=404 if payload.get("error") == "object_not_found" else 400 if payload.get("error") else 200)
+            return
+        if parsed.path == "/api/export.xlsx":
+            try:
+                body, filename = export_excel(parse_qs(parsed.query))
+            except RuntimeError as exc:
+                if str(exc) == "excel_dependency_missing":
+                    self.write_json({"error": "excel_dependency_missing"}, status=500)
+                    return
+                raise
+            self.write_binary(
+                body,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                filename,
+            )
+            return
         if parsed.path == "/api/quality":
             self.write_json({"issues": QUALITY_ISSUES, "summary": quality_summary(), "load_stats": LOAD_STATS})
             return
@@ -1302,6 +1583,15 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def write_binary(self, body: bytes, content_type: str, filename: str) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)

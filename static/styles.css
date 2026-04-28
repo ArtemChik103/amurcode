@@ -905,9 +905,10 @@ th.number {
 }
 
 .readiness-list div {
-  display: flex;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
   align-items: center;
-  gap: 8px;
+  gap: 5px 8px;
   padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: 7px;
@@ -928,9 +929,33 @@ th.number {
   color: var(--success);
 }
 
+.readiness-list .warn span {
+  background: color-mix(in srgb, var(--warn) 18%, transparent);
+  color: var(--warn);
+}
+
 .readiness-list .bad span {
   background: color-mix(in srgb, var(--danger) 18%, transparent);
   color: var(--danger);
+}
+
+.readiness-list small {
+  grid-column: 2;
+  color: var(--muted);
+  line-height: 1.3;
+}
+
+.row-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.compact-button {
+  min-height: 30px;
+  padding: 5px 9px;
+  font-size: 12px;
 }
 
 .icon-only {
@@ -986,6 +1011,29 @@ dialog {
 dialog::backdrop {
   background: rgba(0, 0, 0, 0.55);
   backdrop-filter: blur(5px);
+}
+
+.object-card-body {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
+.object-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.dialog-section h4 {
+  margin-bottom: 8px;
+  color: var(--heading);
+}
+
+.object-documents {
+  display: grid;
+  gap: 8px;
 }
 
 .dialog-head {

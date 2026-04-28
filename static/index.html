@@ -100,7 +100,8 @@
 
         <div class="side-actions">
           <button type="button" class="ghost" @click="resetFilters">Очистить</button>
-          <button type="button" class="primary" @click="exportCsv">Скачать таблицу</button>
+          <button type="button" class="primary" @click="exportExcel">Скачать Excel</button>
+          <button type="button" class="ghost" @click="exportCsv">Скачать таблицу</button>
         </div>
       </aside>
 
@@ -216,14 +217,15 @@
           <article v-if="readinessOpen" class="panel readiness-panel">
             <div class="panel-head">
               <div>
-                <h3>Готовность демонстрации</h3>
-                <p>Быстрая проверка данных и текущей выборки</p>
+                <h3>Готовность данных</h3>
+                <p>{{ readiness.summary.ok || 0 }} ок · {{ readiness.summary.warn || 0 }} предупреждений · {{ readiness.summary.bad || 0 }} ошибок</p>
               </div>
             </div>
             <div class="readiness-list">
-              <div v-for="item in demoReadiness" :key="item.label" :class="{ ok: item.ok, bad: !item.ok }">
-                <span>{{ item.ok ? '✓' : '!' }}</span>
+              <div v-for="item in demoReadiness" :key="item.code" :class="[item.status]">
+                <span>{{ item.status === 'ok' ? '✓' : '!' }}</span>
                 <strong>{{ item.label }}</strong>
+                <small>{{ item.message }}</small>
               </div>
             </div>
           </article>
@@ -267,8 +269,14 @@
                     <td class="number">{{ formatMoney(row.documents) }}</td>
                     <td class="number">{{ formatMoney(row.paid) }}</td>
                     <td class="number">{{ formatMoney(row.cash) }}</td>
-                    <td><span class="status-pill" :class="row.statusClass">{{ row.statusLabel }}</span></td>
-                    <td><button type="button" class="icon-only" @click="togglePipeline(row)" title="Цепочка денег">↔</button></td>
+                    <td>
+                      <span class="status-pill" :class="row.statusClass">{{ row.statusLabel }}</span>
+                      <small v-if="row.match_confidence !== 'high'" class="muted-line">Возможна неполная связка источников</small>
+                    </td>
+                    <td class="row-actions">
+                      <button type="button" class="ghost compact-button" @click="openObject(row)">Открыть</button>
+                      <button type="button" class="icon-only" @click="togglePipeline(row)" title="Цепочка денег">↔</button>
+                    </td>
                   </tr>
                   <tr v-if="expandedPipelines[row.rowKey]" class="pipeline-row">
                     <td colspan="7">
@@ -311,6 +319,7 @@
                 <div v-for="row in group.rows.slice(0, 20)" :key="group.reason + row.rowKey" class="problem-item">
                   <strong>{{ row.object_name || row.object_code }}</strong>
                   <span>{{ formatMoney(row.plan) }} план · {{ formatMoney(row.cash) }} касса</span>
+                  <button type="button" class="ghost compact-button" @click="openObject(row)">Открыть</button>
                 </div>
               </section>
             </div>
@@ -409,6 +418,62 @@
           </div>
         </section>
       </main>
+
+      <dialog ref="objectDialog" class="object-dialog">
+        <div class="dialog-head">
+          <div>
+            <h3>{{ objectCard?.object_name || objectCard?.object_code || 'Карточка объекта' }}</h3>
+            <p>{{ objectCard?.object_code }} · {{ objectCard?.budget }}</p>
+          </div>
+          <button type="button" class="icon-only" @click="$refs.objectDialog.close()" title="Закрыть">×</button>
+        </div>
+        <div v-if="loading.object" class="skeleton">Загрузка карточки...</div>
+        <div v-else-if="objectCard" class="object-card-body">
+          <div class="object-summary">
+            <span class="status-pill" :class="rowStatusClass(rowStatus(objectCard))">{{ rowStatusLabel(rowStatus(objectCard)) }}</span>
+            <span v-for="source in objectCard.sources" :key="source" class="pill muted">{{ source }}</span>
+          </div>
+          <div class="pipeline-line">
+            <span>План {{ formatMoney(objectCard.pipeline?.plan) }}</span>
+            <span>Документы {{ formatMoney(objectCard.pipeline?.documents) }}</span>
+            <span>Оплачено {{ formatMoney(objectCard.pipeline?.paid) }}</span>
+            <span>Касса {{ formatMoney(objectCard.pipeline?.cash) }}</span>
+          </div>
+          <div class="dialog-section">
+            <h4>Документы</h4>
+            <div v-if="!objectCard.documents.length" class="empty-state">Документы не найдены.</div>
+            <div v-else class="object-documents">
+              <div v-for="doc in objectCard.documents.slice(0, 20)" :key="doc.source + doc.number + doc.date" class="problem-item">
+                <strong>{{ doc.source }} {{ doc.number }}</strong>
+                <span>{{ doc.date }} · {{ doc.counterparty || 'контрагент не указан' }} · {{ formatMoney(doc.amount) }}</span>
+              </div>
+            </div>
+          </div>
+          <button type="button" class="ghost" @click="objectRowsOpen = !objectRowsOpen">Откуда цифры</button>
+          <div v-if="objectRowsOpen" class="table-wrap compact">
+            <table>
+              <thead>
+                <tr>
+                  <th>Дата</th>
+                  <th>Источник</th>
+                  <th>Документ</th>
+                  <th>Контрагент</th>
+                  <th class="number">Сумма</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in objectCard.records" :key="row.id">
+                  <td>{{ row.event_date || row.snapshot }}</td>
+                  <td>{{ row.source }}</td>
+                  <td>{{ row.document_number }}</td>
+                  <td>{{ row.counterparty }}</td>
+                  <td class="number">{{ formatMoney(detailAmount(row)) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </dialog>
 
       <dialog ref="traceDialog" class="trace-dialog">
         <div class="dialog-head">

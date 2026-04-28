@@ -1,10 +1,13 @@
 import json
 import threading
 import unittest
+from io import BytesIO
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
+from urllib.parse import quote
 
 import app
+from openpyxl import load_workbook
 
 
 class ParserTests(unittest.TestCase):
@@ -25,6 +28,14 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(app.normalize_code("08.3.02.97070"), "0830297070")
         self.assertEqual(app.normalize_code("13.2.01.97003"), "1320197003")
         self.assertEqual(app.normalize_code("101016105Б"), "101016105Б")
+
+    def test_find_header_value_matches_year_independent_prefix(self):
+        row = {"Лимиты ПБС 2026 год": "123"}
+        self.assertEqual(app.find_header_value(row, "Лимиты ПБС"), "123")
+
+    def test_object_group_key_uses_code_and_budget_or_normalized_name(self):
+        self.assertEqual(app.object_group_key({"object_code_norm": "001", "budget": "Областной бюджет"}), "001|областной бюджет")
+        self.assertEqual(app.object_group_key({"object_name": "  Объект, СКК! ", "budget": ""}), "name:объект скк|")
 
 
 class DataLoadTests(unittest.TestCase):
@@ -146,6 +157,11 @@ class DataLoadTests(unittest.TestCase):
         result = app.aggregate(app.select_as_of(records, "2025-02-15", {}))
         self.assertEqual(result["totals"]["limit"], 20)
 
+    def test_rcb_2026_limit_and_obligation_columns_are_loaded(self):
+        result = app.query_as_of({"date": ["2026-04-01"], "template": ["all"]})
+        self.assertGreater(result["totals"]["limit"], 0)
+        self.assertGreater(result["totals"]["obligation"], 0)
+
     def test_agreements_are_not_duplicated_across_monthly_snapshots(self):
         records = [
             {"source": "Соглашения", "record_kind": "agreement_snapshot", "snapshot": "2025-01-01", "document_id": "a1", "object_code_norm": "1", "object_code": "1", "object_name": "obj", "budget": "", "limit": 0, "obligation": 0, "cash": 0, "agreement": 50, "contract": 0, "payment": 0, "buau": 0},
@@ -183,6 +199,27 @@ class DataLoadTests(unittest.TestCase):
         self.assertIn("pipeline", row)
         self.assertIn("plan", row["pipeline"])
         self.assertIn("problem_reasons", row)
+        self.assertIn("object_key", row)
+        self.assertIn("match_confidence", row)
+
+    def test_object_detail_returns_first_query_row(self):
+        result = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"]})
+        row = result["rows"][0]
+        payload = app.object_detail({"date": ["2026-04-01"], "template": ["skk"], "object_key": [row["object_key"]]})
+        self.assertEqual(payload["object_key"], row["object_key"])
+        self.assertIn("pipeline", payload)
+        self.assertIn("documents", payload)
+
+    def test_readiness_summary_returns_checks(self):
+        payload = app.readiness_response({"date": ["2026-04-01"], "template": ["skk"]})
+        self.assertEqual(payload["date"], "2026-04-01")
+        self.assertTrue(payload["checks"])
+        self.assertIn("summary", payload)
+
+    def test_empty_readiness_marks_empty_result(self):
+        payload = app.readiness_response({"date": ["2026-04-01"], "template": ["skk"], "q": ["zzzz-no-data"]})
+        empty = next(check for check in payload["checks"] if check["code"] == "empty_result")
+        self.assertIn(empty["status"], {"warn", "bad"})
 
     def test_quick_actions_use_as_of_date(self):
         self.assertEqual(app.QUICK_ACTIONS["execution_problems"]["post_filter"], "execution_problems")
@@ -279,6 +316,7 @@ class HttpTests(unittest.TestCase):
             "/api/catalog/budgets",
             "/api/catalog/objects?q=6105",
             "/api/quality",
+            "/api/readiness?view=as_of&date=2026-04-01&template=skk",
             "/api/compare?base=2025-02-01&target=2026-04-01&template=skk&metrics=limit,cash",
         ):
             status, content_type, body = self.request(path)
@@ -293,6 +331,23 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(payload["id"], record_id)
         self.assertIn("raw", payload)
         self.assertIn("human_summary", payload)
+
+    def test_object_and_excel_export_endpoints(self):
+        query = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"]})
+        object_key = query["rows"][0]["object_key"]
+        status, content_type, body = self.request(f"/api/object?date=2026-04-01&template=skk&object_key={quote(object_key)}")
+        self.assertEqual(status, 200)
+        self.assertIn("application/json", content_type)
+        payload = json.loads(body.decode("utf-8"))
+        self.assertEqual(payload["object_key"], object_key)
+
+        status, content_type, body = self.request("/api/export.xlsx?date=2026-04-01&template=skk")
+        self.assertEqual(status, 200)
+        self.assertIn("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", content_type)
+        workbook = load_workbook(BytesIO(body), read_only=True)
+        self.assertEqual(workbook.sheetnames, ["Итоги", "Объекты", "Проблемы", "Исходные строки", "Методика"])
+        method_text = "\n".join(str(row[0] or "") for row in workbook["Методика"].iter_rows(values_only=True))
+        self.assertIn("последний месячный срез", method_text)
 
     def test_assistant_endpoint_returns_rule_based_json_without_groq(self):
         status, content_type, body = self.request(
@@ -340,6 +395,9 @@ class StaticFilesTests(unittest.TestCase):
         self.assertIn("/api/query", script)
         self.assertIn("/api/compare", script)
         self.assertIn("/api/trace", script)
+        self.assertIn("/api/readiness", script)
+        self.assertIn("/api/object", script)
+        self.assertIn("/api/export.xlsx", script)
         self.assertIn("/api/catalog/quick-actions", script)
         self.assertIn("/api/assistant", script)
         self.assertIn("grid-template-columns", styles)
@@ -359,6 +417,8 @@ class StaticFilesTests(unittest.TestCase):
             "loadCompare",
             "openTrace",
             "exportCsv",
+            "exportExcel",
+            "openObject",
             "quickActions",
             "smartInput",
             "assistant",
