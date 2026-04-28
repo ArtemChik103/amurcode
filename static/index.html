@@ -1,0 +1,446 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Простая аналитика расходов</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div id="app" v-cloak>
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">АО</div>
+          <div>
+            <h1>Аналитика расходов</h1>
+            <p>Бюджеты, договоры и платежи</p>
+          </div>
+        </div>
+
+        <div class="mode-switch" aria-label="Режим">
+          <button type="button" :class="{ active: mode === 'slice' }" @click="setMode('slice')">На дату</button>
+          <button type="button" :class="{ active: mode === 'compare' }" @click="setMode('compare')">Что изменилось</button>
+        </div>
+
+        <button type="button" class="theme-toggle" @click="toggleTheme">
+          <span class="theme-icon" aria-hidden="true">{{ theme === 'dark' ? '◐' : '○' }}</span>
+          <span>{{ theme === 'dark' ? 'Тёмный вид' : 'Светлый вид' }}</span>
+        </button>
+
+        <section class="filter-stack" aria-label="Расширенные настройки">
+          <button type="button" class="ghost full-width" @click="advancedOpen = !advancedOpen">
+            {{ advancedOpen ? 'Скрыть настройки' : 'Расширенные настройки' }}
+          </button>
+          <div v-show="advancedOpen" class="advanced-stack">
+            <div class="filter-group-title">Что найти</div>
+            <label>
+              <span>Поиск</span>
+              <input v-model.trim="filters.q" type="search" placeholder="объект, бюджет, получатель" @input="scheduleLoad" />
+            </label>
+            <label>
+              <span>Код</span>
+              <input v-model.trim="filters.code" type="search" placeholder="970, 6105, КЦСР" @input="scheduleLoad" />
+            </label>
+
+            <div class="filter-group-title">Какие данные</div>
+            <label>
+              <span>Готовый отчёт</span>
+              <select v-model="filters.template">
+                <option v-for="template in templates" :key="template.code" :value="template.code">{{ template.code === 'all' ? 'Все данные' : template.label }}</option>
+              </select>
+            </label>
+            <label>
+              <span>Бюджет</span>
+              <select v-model="filters.budget">
+                <option value="">Все бюджеты</option>
+                <option v-for="budget in meta.budgets" :key="budget" :value="budget">{{ budget }}</option>
+              </select>
+            </label>
+            <label>
+              <span>Откуда брать данные</span>
+              <select v-model="filters.source">
+                <option value="">Все источники</option>
+                <option v-for="source in meta.sources" :key="source" :value="source">{{ source }}</option>
+              </select>
+            </label>
+
+            <div class="filter-group-title">Дата</div>
+            <div v-if="mode === 'slice'" class="date-grid">
+              <label>
+                <span>На дату</span>
+                <select v-model="filters.date">
+                  <option v-for="item in reportingDates" :key="item.date" :value="item.date">{{ item.label }}</option>
+                </select>
+              </label>
+            </div>
+            <div v-else class="date-grid">
+              <label>
+                <span>База</span>
+                <select v-model="filters.base">
+                  <option v-for="item in reportingDates" :key="item.date" :value="item.date">{{ item.label }}</option>
+                </select>
+              </label>
+              <label>
+                <span>Цель</span>
+                <select v-model="filters.target">
+                  <option v-for="item in reportingDates" :key="item.date" :value="item.date">{{ item.label }}</option>
+                </select>
+              </label>
+            </div>
+
+            <section class="metric-box" aria-label="Какие суммы показать">
+              <div class="section-title">Какие суммы показать</div>
+              <label v-for="metric in metrics" :key="metric.code" class="metric-check">
+                <input type="checkbox" :value="metric.code" v-model="selectedMetrics" />
+                <span>{{ metric.label }}</span>
+              </label>
+            </section>
+          </div>
+        </section>
+
+        <div class="side-actions">
+          <button type="button" class="ghost" @click="resetFilters">Очистить</button>
+          <button type="button" class="primary" @click="exportCsv">Скачать таблицу</button>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <div class="eyebrow">{{ activeTemplateLabel }}</div>
+            <h2>{{ mode === 'slice' ? 'Состояние на дату' : 'Что изменилось' }}</h2>
+          </div>
+          <div class="status-strip">
+            <span v-if="loading.meta || loading.query || loading.compare">Загрузка...</span>
+            <span>{{ meta.records || 0 }} записей</span>
+            <span>{{ meta.sources.length || 0 }} источников</span>
+            <span :class="{ warn: quality.summary.warnings || quality.summary.errors }">
+              {{ quality.summary.warnings || 0 }} предупреждений · {{ quality.summary.errors || 0 }} ошибок
+            </span>
+          </div>
+        </header>
+
+        <div v-if="error" class="error-banner">{{ error }}</div>
+
+        <section class="quick-start">
+          <h3>Что нужно получить?</h3>
+          <div class="quick-action-grid">
+            <button v-for="action in quickActions" :key="action.code" type="button" class="quick-action" @click="applyQuickAction(action)">
+              <strong>{{ action.label }}</strong>
+              <span>{{ action.description }}</span>
+            </button>
+          </div>
+        </section>
+
+        <section class="smart-search">
+          <label>
+            <span>Напишите объект, код или вопрос</span>
+            <input
+              v-model.trim="smartInput"
+              type="search"
+              placeholder="Например: СКК Благовещенск"
+              @input="onSmartInput"
+              @keydown.enter.prevent="applyFirstSuggestion"
+            />
+          </label>
+          <div class="examples">Примеры: СКК Благовещенск · где нет кассы · сравнить СКК · 970 Свободный</div>
+          <div v-if="smartSuggestions.length" class="suggestions">
+            <button v-for="suggestion in smartSuggestions" :key="suggestion.code" type="button" @click="applySmartSuggestion(suggestion)">
+              <strong>{{ suggestion.title }}</strong>
+              <span>{{ suggestion.description }}</span>
+            </button>
+          </div>
+        </section>
+
+        <section class="assistant-card">
+          <div>
+            <div class="section-kicker">Спросить помощника</div>
+            <h3>Помощник понимает обычные вопросы</h3>
+          </div>
+          <textarea v-model.trim="assistant.message" placeholder="Например: покажи СКК по Благовещенску"></textarea>
+          <div class="assistant-actions">
+            <button type="button" class="primary" @click="askAssistant" :disabled="assistant.loading">
+              {{ assistant.loading ? 'Разбираю запрос...' : 'Понять запрос' }}
+            </button>
+            <span v-if="assistant.response" class="pill muted">{{ assistant.response.mode === 'llm' ? 'Groq' : 'Правила' }}</span>
+          </div>
+          <div v-if="assistant.response" class="assistant-response">
+            <p>{{ assistant.response.message }}</p>
+            <button type="button" class="primary" @click="applyAssistantAction(assistant.response.action)">Показать результат</button>
+            <button v-for="alt in assistant.response.alternatives" :key="alt.label" type="button" class="ghost" @click="applyAssistantAction(alt.action)">
+              {{ alt.label }}
+            </button>
+          </div>
+        </section>
+
+        <section class="answer-card" :class="resultNarrative.severity">
+          <div class="section-kicker">Короткий вывод</div>
+          <h3>{{ resultNarrative.title }}</h3>
+          <ul>
+            <li v-for="item in resultNarrative.bullets" :key="item">{{ item }}</li>
+          </ul>
+          <div v-if="resultNarrative.severity === 'empty'" class="empty-actions">
+            <button v-for="item in emptyStateSuggestions" :key="item.label" type="button" class="ghost" @click="applyEmptySuggestion(item)">
+              {{ item.label }}
+            </button>
+          </div>
+        </section>
+
+        <nav ref="resultTabs" class="view-tabs" aria-label="Разделы">
+          <button v-for="tab in viewTabs" :key="tab.code" type="button" :class="{ active: currentView === tab.code }" @click="setView(tab.code)">
+            <span>{{ tab.label }}</span>
+            <small>{{ tab.count }}</small>
+          </button>
+        </nav>
+
+        <section v-if="mode === 'slice' && currentView === 'overview'" class="kpi-grid" aria-label="Показатели">
+          <article v-for="metric in activeMetricObjects" :key="metric.code" class="kpi-card">
+            <span>{{ metric.label }}</span>
+            <strong>{{ formatMoney(query.totals[metric.code]) }}</strong>
+            <small>{{ metricHint(metric.code) }}</small>
+          </article>
+        </section>
+
+        <section v-if="mode === 'slice' && currentView === 'overview'" class="workspace-grid">
+          <article class="panel chart-panel">
+            <div class="panel-head">
+              <div>
+                <h3>Движение по датам</h3>
+                <p>{{ query.count || 0 }} строк в выборке</p>
+              </div>
+              <button type="button" class="ghost" @click="readinessOpen = !readinessOpen">Проверить перед показом</button>
+            </div>
+            <canvas ref="chart" height="280"></canvas>
+          </article>
+
+          <article v-if="readinessOpen" class="panel readiness-panel">
+            <div class="panel-head">
+              <div>
+                <h3>Готовность демонстрации</h3>
+                <p>Быстрая проверка данных и текущей выборки</p>
+              </div>
+            </div>
+            <div class="readiness-list">
+              <div v-for="item in demoReadiness" :key="item.label" :class="{ ok: item.ok, bad: !item.ok }">
+                <span>{{ item.ok ? '✓' : '!' }}</span>
+                <strong>{{ item.label }}</strong>
+              </div>
+            </div>
+          </article>
+        </section>
+
+        <section v-if="mode === 'slice' && currentView === 'objects'" class="panel table-panel">
+          <div class="panel-head">
+            <div>
+              <h3>Объекты</h3>
+              <p>{{ simpleRows.length }} строк</p>
+            </div>
+          </div>
+          <div v-if="!simpleRows.length && !loading.query" class="empty-state">
+            <h3>Ничего не найдено</h3>
+            <p>Попробуйте расширить выборку.</p>
+            <button v-for="item in emptyStateSuggestions" :key="item.label" type="button" class="ghost" @click="applyEmptySuggestion(item)">{{ item.label }}</button>
+          </div>
+          <div v-else class="table-wrap simple-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>Объект</th>
+                  <th class="number">План</th>
+                  <th class="number">Документы</th>
+                  <th class="number">Оплачено</th>
+                  <th class="number">Касса</th>
+                  <th>Статус</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-if="loading.query" class="loading-row"><td colspan="7">Загрузка...</td></tr>
+                <template v-else>
+                  <template v-for="row in simpleRows" :key="row.rowKey">
+                  <tr>
+                    <td>
+                      <strong>{{ row.object_name || row.object_code }}</strong>
+                      <small class="muted-line">{{ row.object_code }} · {{ row.budget }}</small>
+                    </td>
+                    <td class="number">{{ formatMoney(row.plan) }}</td>
+                    <td class="number">{{ formatMoney(row.documents) }}</td>
+                    <td class="number">{{ formatMoney(row.paid) }}</td>
+                    <td class="number">{{ formatMoney(row.cash) }}</td>
+                    <td><span class="status-pill" :class="row.statusClass">{{ row.statusLabel }}</span></td>
+                    <td><button type="button" class="icon-only" @click="togglePipeline(row)" title="Цепочка денег">↔</button></td>
+                  </tr>
+                  <tr v-if="expandedPipelines[row.rowKey]" class="pipeline-row">
+                    <td colspan="7">
+                      <div class="pipeline-line">
+                        <span>План {{ formatMoney(row.pipeline.plan) }}</span>
+                        <span>Документы {{ formatMoney(row.pipeline.documents) }}</span>
+                        <span>Оплачено {{ formatMoney(row.pipeline.paid) }}</span>
+                        <span>Касса {{ formatMoney(row.pipeline.cash) }}</span>
+                      </div>
+                    </td>
+                  </tr>
+                  </template>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section v-if="mode === 'slice' && currentView === 'problems'" class="workspace-grid">
+          <article class="panel table-panel">
+            <div class="panel-head">
+              <div>
+                <h3>Проблемы</h3>
+                <p>{{ problemRows.length }} объектов</p>
+              </div>
+              <div class="problem-actions">
+                <button type="button" class="ghost" @click="applyProblemFilter('no_documents')">Нет документов</button>
+                <button type="button" class="ghost" @click="applyProblemFilter('no_payments')">Нет оплат</button>
+                <button type="button" class="ghost" @click="applyProblemFilter('no_cash')">Нет кассы</button>
+                <button type="button" class="ghost" @click="applyProblemFilter('low_cash')">Низкая касса</button>
+              </div>
+            </div>
+            <div v-if="!problemRows.length && !loading.query" class="empty-state">
+              <h3>Проблем не найдено</h3>
+              <p>По текущим условиям нет объектов с явными разрывами.</p>
+            </div>
+            <div v-else class="problem-groups">
+              <section v-for="group in problemGroups" :key="group.reason" class="problem-group">
+                <h4>{{ group.label }} · {{ group.rows.length }}</h4>
+                <div v-for="row in group.rows.slice(0, 20)" :key="group.reason + row.rowKey" class="problem-item">
+                  <strong>{{ row.object_name || row.object_code }}</strong>
+                  <span>{{ formatMoney(row.plan) }} план · {{ formatMoney(row.cash) }} касса</span>
+                </div>
+              </section>
+            </div>
+          </article>
+        </section>
+
+        <section v-if="mode === 'compare' && currentView === 'changes'" class="panel table-panel">
+          <div class="panel-head">
+            <div>
+              <h3>Что изменилось: {{ filters.base }} → {{ filters.target }}</h3>
+              <p>{{ compare.rows.length }} строк</p>
+            </div>
+          </div>
+          <div v-if="!compare.rows.length && !loading.compare" class="empty-state">
+            <h3>Ничего не найдено</h3>
+            <p>Попробуйте расширить выборку.</p>
+            <button v-for="item in emptyStateSuggestions" :key="item.label" type="button" class="ghost" @click="applyEmptySuggestion(item)">{{ item.label }}</button>
+          </div>
+          <div v-else class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Код</th>
+                  <th>Объект</th>
+                  <th>Бюджет</th>
+                  <template v-for="metric in activeMetricObjects" :key="metric.code">
+                    <th class="number">{{ metric.label }} база</th>
+                    <th class="number">{{ metric.label }} цель</th>
+                    <th class="number">Изменение</th>
+                    <th class="number">%</th>
+                  </template>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-if="loading.compare" class="loading-row"><td :colspan="3 + activeMetricObjects.length * 4">Загрузка...</td></tr>
+                <template v-else>
+                  <tr v-for="row in compare.rows" :key="row.object_code + row.budget">
+                    <td class="code">{{ row.object_code }}</td>
+                    <td class="truncate" :title="row.object_name">{{ row.object_name }}</td>
+                    <td class="truncate" :title="row.budget">{{ row.budget }}</td>
+                    <template v-for="metric in activeMetricObjects" :key="metric.code">
+                      <td class="number">{{ formatMoney(row.metrics[metric.code]?.base) }}</td>
+                      <td class="number">{{ formatMoney(row.metrics[metric.code]?.target) }}</td>
+                      <td class="number delta" :class="deltaClass(row.metrics[metric.code]?.delta)">{{ formatMoney(row.metrics[metric.code]?.delta) }}</td>
+                      <td class="number delta" :class="deltaClass(row.metrics[metric.code]?.delta)">{{ formatPercent(row.metrics[metric.code]?.delta_percent) }}</td>
+                    </template>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section v-if="mode === 'slice' && currentView === 'records'" class="panel table-panel detail-panel">
+          <div class="panel-head">
+            <div>
+              <h3>Исходные строки</h3>
+              <p>{{ query.details.length }} строк</p>
+            </div>
+          </div>
+          <div v-if="!query.details.length && !loading.query" class="empty-state">
+            <h3>Ничего не найдено</h3>
+            <p>Попробуйте расширить выборку.</p>
+            <button v-for="item in emptyStateSuggestions" :key="item.label" type="button" class="ghost" @click="applyEmptySuggestion(item)">{{ item.label }}</button>
+          </div>
+          <div v-else class="table-wrap compact">
+            <table>
+              <thead>
+                <tr>
+                  <th>Дата</th>
+                  <th>Источник</th>
+                  <th>Код</th>
+                  <th>Объект</th>
+                  <th>Документ</th>
+                  <th>Контрагент</th>
+                  <th class="number">Сумма</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-if="loading.query" class="loading-row"><td colspan="8">Загрузка...</td></tr>
+                <template v-else>
+                  <tr v-for="row in query.details" :key="row.id">
+                    <td>{{ row.event_date || row.snapshot }}</td>
+                    <td><span class="pill muted">{{ row.source }}</span></td>
+                    <td class="code">{{ row.object_code }}</td>
+                    <td class="truncate" :title="row.object_name">{{ row.object_name }}</td>
+                    <td>{{ row.document_number }}</td>
+                    <td class="truncate" :title="row.counterparty">{{ row.counterparty }}</td>
+                    <td class="number">{{ formatMoney(detailAmount(row)) }}</td>
+                    <td><button type="button" class="icon-only" @click="openTrace(row.id)" title="Откуда цифра">?</button></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+
+      <dialog ref="traceDialog" class="trace-dialog">
+        <div class="dialog-head">
+          <div>
+            <h3>Откуда взялась цифра</h3>
+            <p>{{ trace.source_file }} · строка {{ trace.source_row }}</p>
+          </div>
+          <button type="button" class="icon-only" @click="$refs.traceDialog.close()" title="Закрыть">×</button>
+        </div>
+        <div v-if="loading.trace" class="skeleton">Загрузка источника цифры...</div>
+        <div v-else class="trace-human">
+          <h4>{{ trace.human_summary?.title || 'Исходная строка' }}</h4>
+          <dl>
+            <dt>Источник</dt><dd>{{ trace.source }}</dd>
+            <dt>Файл</dt><dd>{{ trace.source_file }}</dd>
+            <dt>Строка</dt><dd>{{ trace.source_row }}</dd>
+            <dt>Дата</dt><dd>{{ trace.human_summary?.date }}</dd>
+            <dt>Объект</dt><dd>{{ trace.human_summary?.object }}</dd>
+            <dt>Документ</dt><dd>{{ trace.human_summary?.document }}</dd>
+          </dl>
+          <div class="trace-amounts">
+            <span v-for="item in trace.human_summary?.amount_fields || []" :key="item.field" class="pill">{{ item.label }}: {{ formatMoney(item.value) }}</span>
+          </div>
+          <details>
+            <summary>Технические данные</summary>
+            <pre>{{ prettyTrace }}</pre>
+          </details>
+        </div>
+      </dialog>
+    </div>
+
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
