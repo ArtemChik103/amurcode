@@ -10,6 +10,8 @@ import app
 class ParserTests(unittest.TestCase):
     def test_parse_amount_supports_russian_and_machine_formats(self):
         self.assertEqual(app.parse_amount("1 234 567,89"), 1234567.89)
+        self.assertEqual(app.parse_amount("44 622 636,12"), 44622636.12)
+        self.assertEqual(app.parse_amount("-37 206,75"), -37206.75)
         self.assertEqual(app.parse_amount("10000000.00"), 10000000.0)
         self.assertEqual(app.parse_amount(""), 0.0)
         self.assertEqual(app.parse_amount(None), 0.0)
@@ -20,6 +22,7 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(app.parse_date("2026-04-01"), "2026-04-01")
 
     def test_normalize_code_removes_separators_and_keeps_cyrillic_letters(self):
+        self.assertEqual(app.normalize_code("08.3.02.97070"), "0830297070")
         self.assertEqual(app.normalize_code("13.2.01.97003"), "1320197003")
         self.assertEqual(app.normalize_code("101016105Б"), "101016105Б")
 
@@ -84,6 +87,25 @@ class DataLoadTests(unittest.TestCase):
         for metric in ["limit", "obligation", "cash", "agreement", "contract", "payment", "buau"]:
             self.assertIn(metric, result["totals"])
 
+    def test_records_have_trace_fields(self):
+        record = self.store.records[0]
+        self.assertIn("id", record)
+        self.assertIn("source_file", record)
+        self.assertIn("source_row", record)
+        self.assertIn("raw", record)
+
+    def test_metric_selection_limits_totals(self):
+        result = app.aggregate(self.store.records, ["limit", "cash"])
+        self.assertEqual(set(result["totals"]), {"limit", "cash"})
+        self.assertGreater(result["totals"]["limit"], 0)
+        self.assertGreater(result["totals"]["cash"], 0)
+
+    def test_templates_match_expected_code_fragments(self):
+        self.assertTrue(app.matches_template({"object_code_norm": "000006105Б"}, "skk"))
+        self.assertTrue(app.matches_template({"object_code_norm": "00000978"}, "kik"))
+        self.assertTrue(app.matches_template({"object_code_norm": "00000970"}, "two_thirds"))
+        self.assertTrue(app.matches_template({"object_code_norm": "", "kvr": "414"}, "okv"))
+
 
 class HttpTests(unittest.TestCase):
     @classmethod
@@ -133,6 +155,30 @@ class HttpTests(unittest.TestCase):
         self.assertIn("Конструктор аналитических выборок", body.decode("utf-8"))
 
 
+    def test_catalog_quality_trace_and_compare_endpoints_return_json(self):
+        for path in (
+            "/api/catalog/templates",
+            "/api/catalog/metrics",
+            "/api/catalog/dates",
+            "/api/catalog/sources",
+            "/api/catalog/budgets",
+            "/api/catalog/objects?q=6105",
+            "/api/quality",
+            "/api/compare?base=2025-02-01&target=2026-04-01&template=skk&metrics=limit,cash",
+        ):
+            status, content_type, body = self.request(path)
+            self.assertEqual(status, 200, path)
+            self.assertIn("application/json", content_type)
+            self.assertIsNotNone(json.loads(body.decode("utf-8")))
+
+        record_id = app.STORE.records[0]["id"]
+        status, content_type, body = self.request(f"/api/trace?id={record_id}")
+        self.assertEqual(status, 200)
+        payload = json.loads(body.decode("utf-8"))
+        self.assertEqual(payload["id"], record_id)
+        self.assertIn("raw", payload)
+
+
 class StaticFilesTests(unittest.TestCase):
     def test_frontend_assets_exist_and_reference_api(self):
         index = (app.STATIC_DIR / "index.html").read_text(encoding="utf-8")
@@ -142,6 +188,8 @@ class StaticFilesTests(unittest.TestCase):
         self.assertIn("/static/app.js", index)
         self.assertIn("/api/meta", script)
         self.assertIn("/api/query", script)
+        self.assertIn("/api/compare", script)
+        self.assertIn("/api/trace", script)
         self.assertIn("grid-template-columns", styles)
 
 
