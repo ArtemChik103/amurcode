@@ -401,6 +401,53 @@ label span,
   font-weight: 700;
 }
 
+.view-tabs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  margin: 18px 30px 0;
+}
+
+.view-tabs button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 52px;
+  padding: 10px 12px;
+  border-color: var(--line);
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+
+.view-tabs button span {
+  color: var(--heading);
+  font-size: 15px;
+}
+
+.view-tabs button small {
+  display: inline-grid;
+  min-width: 34px;
+  min-height: 26px;
+  place-items: center;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.view-tabs button.active {
+  border-color: color-mix(in srgb, var(--accent) 52%, transparent);
+  background: linear-gradient(135deg, var(--accent-soft), var(--panel));
+}
+
+.view-tabs button.active small {
+  background: var(--accent);
+  color: #042f2e;
+}
+
 .kpi-grid,
 .workspace-grid,
 .panel {
@@ -688,7 +735,8 @@ pre {
   .kpi-grid,
   .workspace-grid,
   .panel,
-  .error-banner {
+  .error-banner,
+  .view-tabs {
     margin-right: 14px;
     margin-left: 14px;
   }

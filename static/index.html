@@ -120,7 +120,14 @@
 
         <div v-if="error" class="error-banner">{{ error }}</div>
 
-        <section class="kpi-grid" aria-label="Показатели">
+        <nav class="view-tabs" aria-label="Разделы">
+          <button v-for="tab in viewTabs" :key="tab.code" type="button" :class="{ active: currentView === tab.code }" @click="setView(tab.code)">
+            <span>{{ tab.label }}</span>
+            <small>{{ tab.count }}</small>
+          </button>
+        </nav>
+
+        <section v-if="mode === 'slice' && currentView === 'overview'" class="kpi-grid" aria-label="Показатели">
           <article v-for="metric in activeMetricObjects" :key="metric.code" class="kpi-card">
             <span>{{ metric.label }}</span>
             <strong>{{ formatMoney(query.totals[metric.code]) }}</strong>
@@ -128,7 +135,7 @@
           </article>
         </section>
 
-        <section v-if="mode === 'slice'" class="workspace-grid">
+        <section v-if="mode === 'slice' && currentView === 'overview'" class="workspace-grid">
           <article class="panel chart-panel">
             <div class="panel-head">
               <div>
@@ -139,6 +146,9 @@
             <canvas ref="chart" height="280"></canvas>
           </article>
 
+        </section>
+
+        <section v-if="mode === 'slice' && currentView === 'summary'" class="workspace-grid">
           <article class="panel table-panel">
             <div class="panel-head">
               <div>
@@ -179,7 +189,7 @@
           </article>
         </section>
 
-        <section v-else class="panel table-panel">
+        <section v-if="mode === 'compare' && currentView === 'changes'" class="panel table-panel">
           <div class="panel-head">
             <div>
               <h3>Что изменилось: {{ filters.base }} → {{ filters.target }}</h3>
@@ -230,7 +240,7 @@
           </div>
         </section>
 
-        <section v-if="mode === 'slice'" class="panel table-panel detail-panel">
+        <section v-if="mode === 'slice' && currentView === 'records'" class="panel table-panel detail-panel">
           <div class="panel-head">
             <div>
               <h3>Исходные записи</h3>

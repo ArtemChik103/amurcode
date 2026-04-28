@@ -27,6 +27,7 @@ createApp({
     return {
       mode: "slice",
       theme: "dark",
+      currentView: "overview",
 
       meta: {
         records: 0,
@@ -137,6 +138,17 @@ createApp({
     isCompareMode() {
       return this.mode === "compare";
     },
+
+    viewTabs() {
+      if (this.mode === "compare") {
+        return [{ code: "changes", label: "Изменения", count: this.compare.rows.length }];
+      }
+      return [
+        { code: "overview", label: "Главное", count: this.query.count || 0 },
+        { code: "summary", label: "Итоги", count: this.query.rows.length },
+        { code: "records", label: "Записи", count: this.query.details.length },
+      ];
+    },
   },
 
   watch: {
@@ -174,6 +186,9 @@ createApp({
         if (!this.initialized) return;
         this.loadData();
       },
+    },
+    currentView() {
+      nextTick(() => this.drawChart());
     },
   },
 
@@ -409,7 +424,13 @@ createApp({
     setMode(mode) {
       if (!["slice", "compare"].includes(mode) || this.mode === mode) return;
       this.mode = mode;
+      this.currentView = mode === "slice" ? "overview" : "changes";
       this.loadData();
+    },
+
+    setView(view) {
+      this.currentView = view;
+      nextTick(() => this.drawChart());
     },
 
     resetFilters() {
