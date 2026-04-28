@@ -9,6 +9,7 @@
   <body>
     <div id="app" v-cloak>
       <aside class="sidebar">
+        <!-- Панель управления хранит все фильтры и действия, которые меняют API-запросы. -->
         <div class="brand">
           <div class="brand-mark">АО</div>
           <div>
@@ -106,6 +107,7 @@
       </aside>
 
       <main class="main">
+        <!-- Основная область показывает результат выбранного сценария: вывод, риски и таблицы. -->
         <header class="topbar">
           <div>
             <div class="eyebrow">{{ activeTemplateLabel }}</div>
@@ -124,6 +126,7 @@
         <div v-if="error" class="error-banner">{{ error }}</div>
 
         <section class="quick-start">
+          <!-- Быстрые сценарии приходят с backend, поэтому UI не дублирует предметные правила. -->
           <h3>Что нужно получить?</h3>
           <div class="quick-action-grid">
             <button v-for="action in quickActions" :key="action.code" type="button" class="quick-action" @click="applyQuickAction(action)">
@@ -444,6 +447,7 @@
       </main>
 
       <dialog ref="objectDialog" class="object-dialog">
+        <!-- Карточка объекта раскрывает агрегат до документов и исходных строк. -->
         <div class="dialog-head">
           <div>
             <h3>{{ objectCard?.object_name || objectCard?.object_code || 'Карточка объекта' }}</h3>

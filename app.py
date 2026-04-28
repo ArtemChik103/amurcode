@@ -1,3 +1,10 @@
+"""Локальный backend аналитики расходов.
+
+Файл совмещает загрузку исходных CSV, нормализацию записей, расчет витрин,
+HTTP API и экспорт Excel. Данные держатся в памяти, поэтому функции ниже
+стараются возвращать готовые для UI структуры без отдельного слоя БД.
+"""
+
 from __future__ import annotations
 
 import csv
@@ -21,6 +28,9 @@ STATIC_DIR = ROOT / "static"
 RAG_DIR = ROOT / "docs" / "rag"
 QUALITY_ISSUES: list[dict] = []
 LOAD_STATS: dict[str, dict[str, int]] = {}
+
+# Метрики хранятся в едином порядке, чтобы backend, UI и Excel одинаково
+# трактовали выбранные суммы.
 METRIC_KEYS = ["limit", "obligation", "cash", "agreement", "contract", "payment", "buau"]
 METRICS = {
     "limit": "Лимиты",
@@ -38,6 +48,9 @@ TEMPLATES = {
     "two_thirds": {"label": "2/3", "description": "КЦСР содержит 970 с 6-й позиции"},
     "okv": {"label": "ОКВ", "description": "Капитальные вложения по КВР"},
 }
+
+# Быстрые действия являются контрактом между API и первым экраном UI:
+# каждое действие разворачивается в обычные query/compare параметры.
 QUICK_ACTIONS = {
     "show_skk": {
         "label": "Собрать отчет СКК",
@@ -159,6 +172,7 @@ def add_quality_issue(
 
 
 def parse_amount(value: object, source_file: str = "", source_row: int | str = "", field: str = "") -> float:
+    """Разбирает суммы из русских CSV и машинных выгрузок в общий float."""
     if value is None:
         return 0.0
     text = str(value).strip().replace("\xa0", " ")
@@ -186,6 +200,7 @@ def parse_amount(value: object, source_file: str = "", source_row: int | str = "
 
 
 def parse_date(value: object, source_file: str = "", source_row: int | str = "", field: str = "") -> str:
+    """Нормализует известные форматы дат к ISO-строке YYYY-MM-DD."""
     if value is None:
         return ""
     text = str(value).strip()
@@ -230,6 +245,7 @@ def normalize_name(value: object) -> str:
 
 
 def object_group_key(record: dict) -> str:
+    """Строит стабильный ключ объекта для склейки строк из разных источников."""
     budget_norm = normalize_name(record.get("budget"))
     code_norm = normalize_code(record.get("object_code_norm") or record.get("object_code"))
     if code_norm:
@@ -270,6 +286,7 @@ def quick_actions_payload() -> list[dict]:
 
 
 def matches_template(record: dict, template: str) -> bool:
+    """Проверяет предметные шаблоны по фрагментам КЦСР или КВР."""
     if not template or template == "all":
         return True
     code = record.get("object_code_norm", "")
@@ -332,6 +349,7 @@ class DataStore:
 
 
 def load_data() -> DataStore:
+    """Загружает все источники и собирает справочники для UI."""
     QUALITY_ISSUES.clear()
     LOAD_STATS.clear()
     records: list[dict] = []
@@ -369,6 +387,7 @@ def load_data() -> DataStore:
 
 
 def enrich_records(records: list[dict]) -> None:
+    """Дополняет записи техническими полями, нужными для trace и агрегации."""
     source_counts: dict[str, int] = defaultdict(int)
     source_folders = {
         "РЧБ": "case/1_RCB",
@@ -415,6 +434,7 @@ def finish_load_stats(stats: dict[str, int], issue_start: int) -> None:
 
 
 def load_rcb(records: list[dict]) -> None:
+    """Читает РЧБ как месячные срезы лимитов, БО и кассового исполнения."""
     folder = DATA_DIR / "1_RCB"
     for path in sorted(folder.glob("*.csv")):
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -471,6 +491,7 @@ def load_rcb(records: list[dict]) -> None:
 
 
 def load_agreements(records: list[dict]) -> None:
+    """Читает соглашения как срезы на отчетные даты."""
     folder = DATA_DIR / "2_Agreements"
     class_names = {
         "273": "МБТ",
@@ -522,6 +543,7 @@ def load_agreements(records: list[dict]) -> None:
 
 
 def load_state_task(records: list[dict]) -> None:
+    """Читает выгрузки госзадания: контракты и платежки как события."""
     folder = DATA_DIR / "3_StateTask"
     budget_lines: dict[str, list[dict[str, str]]] = defaultdict(list)
     lines_path = folder / "Бюджетные строки.csv"
@@ -621,6 +643,7 @@ def load_state_task(records: list[dict]) -> None:
 
 
 def load_buau(records: list[dict]) -> None:
+    """Читает выплаты БУ/АУ как события, накопительные к выбранной дате."""
     folder = DATA_DIR / "4_BUAU_Export"
     for path in sorted(folder.glob("*.csv")):
         snapshot = buau_snapshot(path.name)
@@ -666,6 +689,7 @@ def load_buau(records: list[dict]) -> None:
 
 
 def apply_filters(records: list[dict], params: dict[str, list[str]]) -> list[dict]:
+    """Применяет текстовые, кодовые, бюджетные и шаблонные фильтры."""
     text = params.get("q", [""])[0].strip().lower()
     code = normalize_code(params.get("code", [""])[0])
     budget = params.get("budget", [""])[0].strip().lower()
@@ -704,6 +728,11 @@ def reporting_dates_payload() -> list[dict]:
 
 
 def select_as_of(records: list[dict], date: str, params: dict[str, list[str]]) -> list[dict]:
+    """Собирает состояние на дату.
+
+    Срезовые источники берутся последним доступным снимком не позже даты,
+    а событийные источники суммируются накопительно до этой же даты.
+    """
     if not date:
         dates = STORE.meta.get("reporting_dates", []) if "STORE" in globals() else []
         date = dates[-1] if dates else ""
@@ -737,6 +766,7 @@ def percent_or_none(numerator: float, denominator: float) -> float | None:
 
 
 def row_pipeline(row: dict) -> dict:
+    """Сводит метрики объекта в управленческую цепочку план-документы-оплаты-касса."""
     plan = float(row.get("limit") or 0) + float(row.get("obligation") or 0)
     documents = float(row.get("agreement") or 0) + float(row.get("contract") or 0)
     paid = float(row.get("payment") or 0) + float(row.get("buau") or 0)
@@ -761,6 +791,7 @@ def row_pipeline(row: dict) -> dict:
 
 
 def problem_reasons(row: dict) -> list[str]:
+    """Возвращает машинные причины, по которым объект попадает в проблемные."""
     pipeline = row.get("pipeline") or row_pipeline(row)
     reasons = []
     if "documents" in pipeline["missing_steps"]:
@@ -777,6 +808,7 @@ def problem_reasons(row: dict) -> list[str]:
 
 
 def risk_score(row: dict) -> int:
+    """Считает приоритет ручной проверки, а не юридическую оценку нарушения."""
     pipeline = row.get("pipeline") or row_pipeline(row)
     reasons = row.get("problem_reasons") or problem_reasons(row)
     plan = float(pipeline.get("plan") or 0)
@@ -852,6 +884,7 @@ def row_status_from_reasons(reasons: list[str]) -> str:
 
 
 def aggregate(records: list[dict], metrics: list[str] | None = None) -> dict:
+    """Группирует нормализованные строки в таблицу объектов и totals для UI."""
     groups: dict[str, dict] = {}
     timeline: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
     metric_keys = metrics or list(METRIC_KEYS)
@@ -924,6 +957,7 @@ def aggregate(records: list[dict], metrics: list[str] | None = None) -> dict:
 
 
 def apply_aggregate_post_filter(result: dict, post_filter: str, metrics: list[str]) -> dict:
+    """Фильтрует уже агрегированные объекты по проблемам исполнения."""
     aliases = {"execution_problems": "execution_problems"}
     selected = aliases.get(post_filter, post_filter)
     valid = {"no_documents", "no_payments", "no_cash", "low_cash", "low_execution", "data_gap", "execution_problems"}
@@ -953,6 +987,7 @@ def apply_aggregate_post_filter(result: dict, post_filter: str, metrics: list[st
 
 
 def attention_summary(result: dict, template: str, date: str) -> dict:
+    """Готовит короткий управленческий вывод и топ рисков для первого экрана."""
     rows = result.get("rows") or []
     if not rows:
         return {
@@ -1047,6 +1082,7 @@ def catalog_objects(records: list[dict], params: dict[str, list[str]]) -> list[d
 
 
 def load_rag_documents() -> list[dict]:
+    """Загружает небольшую markdown-базу знаний для помощника."""
     documents = []
     if not RAG_DIR.exists():
         return documents
@@ -1058,6 +1094,7 @@ def load_rag_documents() -> list[dict]:
 
 
 def retrieve_rag_context(message: str, limit: int = 4) -> str:
+    """Выбирает релевантные RAG-документы простым лексическим скорингом."""
     query_words = {word for word in re.findall(r"[0-9A-Za-zА-Яа-яЁё/]+", message.lower()) if len(word) > 1}
     scored = []
     for document in load_rag_documents():
@@ -1080,6 +1117,7 @@ def clean_search_text(message: str) -> str:
 
 
 def assistant_rule_based(message: str, context: dict | None = None) -> dict:
+    """Детерминированный парсер пользовательского вопроса без внешнего LLM."""
     context = context or {}
     lower = message.lower()
     start, end = default_date_range()
@@ -1183,6 +1221,7 @@ def assistant_rule_based(message: str, context: dict | None = None) -> dict:
 
 
 def validate_assistant_action(action: dict, fallback: dict) -> dict:
+    """Ограничивает действие LLM публичным набором фильтров, шаблонов и метрик."""
     result = dict(fallback)
     if not isinstance(action, dict):
         return result
@@ -1202,6 +1241,7 @@ def validate_assistant_action(action: dict, fallback: dict) -> dict:
 
 
 def assistant_llm(message: str, context: dict, rag_context: str) -> dict:
+    """Опционально уточняет intent через Groq, не передавая исходные записи."""
     api_key = os.environ.get("GROQ_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError("GROQ_API_KEY is not set")
@@ -1262,6 +1302,7 @@ def assistant_llm(message: str, context: dict, rag_context: str) -> dict:
 
 
 def assistant_response(message: str, context: dict | None = None) -> dict:
+    """Возвращает ответ помощника с безопасным fallback на правила."""
     context = context or {}
     fallback = assistant_rule_based(message, context)
     if os.environ.get("ASSISTANT_ENABLED", "auto").lower() == "false":
@@ -1275,6 +1316,7 @@ def assistant_response(message: str, context: dict | None = None) -> dict:
 
 
 def trace_record(record_id: str) -> dict | None:
+    """Раскрывает нормализованную и исходную строку для кнопки 'Откуда цифра'."""
     for record in STORE.records:
         if record.get("id") == record_id:
             normalized = {key: value for key, value in record.items() if key not in {"raw"}}
@@ -1325,6 +1367,7 @@ def readiness_check(status: str, code: str, label: str, message: str) -> dict:
 
 
 def readiness_summary(records: list[dict], rows: list[dict], params: dict[str, list[str]]) -> dict:
+    """Собирает проверки, которые предупреждают пользователя о неполной выборке."""
     date = params.get("date", [""])[0].strip()
     if not date:
         dates = STORE.meta.get("reporting_dates", [])
@@ -1375,6 +1418,7 @@ def readiness_summary(records: list[dict], rows: list[dict], params: dict[str, l
 
 
 def query_as_of(params: dict[str, list[str]]) -> dict:
+    """Основной API-сценарий: состояние на дату с рисками, выводом и графиком."""
     date = params.get("date", [""])[0].strip()
     if not date:
         dates = STORE.meta.get("reporting_dates", [])
@@ -1395,6 +1439,7 @@ def query_as_of(params: dict[str, list[str]]) -> dict:
 
 
 def as_of_timeline(date: str, params: dict[str, list[str]], metrics: list[str]) -> list[dict]:
+    """Строит точки графика в той же as-of семантике, что и текущая выборка."""
     post_filter = params.get("post_filter", [""])[0].strip()
     dates = [item for item in STORE.meta.get("reporting_dates", []) if not date or item <= date]
     points = []
@@ -1423,6 +1468,7 @@ def readiness_response(params: dict[str, list[str]]) -> dict:
 
 
 def object_detail(params: dict[str, list[str]]) -> dict:
+    """Возвращает карточку объекта с документами и исходными строками."""
     object_key = params.get("object_key", [""])[0].strip()
     if not object_key:
         return {"error": "object_key_required"}
@@ -1467,6 +1513,7 @@ def object_detail(params: dict[str, list[str]]) -> dict:
 
 
 def export_excel(params: dict[str, list[str]]) -> tuple[bytes, str]:
+    """Формирует рабочий Excel: выводы, итоги, объекты, проблемы и методику."""
     try:
         from openpyxl import Workbook
         from openpyxl.styles import Font
@@ -1639,6 +1686,7 @@ def compare_object_summary(row: dict, risk_value: int | None = None, base_row: d
 
 
 def compare_insights(base_rows: list[dict], target_rows: list[dict]) -> dict:
+    """Выделяет существенные изменения риска между двумя отчетными датами."""
     base_by_key = {row.get("object_key") or object_group_key(row): row for row in base_rows}
     target_by_key = {row.get("object_key") or object_group_key(row): row for row in target_rows}
     new_problem_objects = []
@@ -1705,6 +1753,7 @@ def compare_insights(base_rows: list[dict], target_rows: list[dict]) -> dict:
 
 
 def compare_periods(params: dict[str, list[str]]) -> dict:
+    """Сравнивает две даты по тем же правилам as-of, что и основной режим."""
     base = params.get("base", [""])[0].strip()
     target = params.get("target", [""])[0].strip()
     if not base or not target:
@@ -1764,6 +1813,8 @@ STORE = load_data()
 
 
 class Handler(SimpleHTTPRequestHandler):
+    """Минимальный HTTP-слой: static files и JSON API без внешнего фреймворка."""
+
     def translate_path(self, path: str) -> str:
         parsed = urlparse(path)
         requested = parsed.path

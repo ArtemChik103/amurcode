@@ -13,10 +13,12 @@ const METRIC_LABELS = {
   buau: "БУ/АУ",
 };
 
+// CSV экспорт делается на клиенте, поэтому значения экранируются до сборки строк.
 function csvCell(value) {
   return `"${String(value ?? "").replaceAll('"', '""')}"`;
 }
 
+// Общий debounce для поиска и перерисовки графика, чтобы не спамить API.
 function debounce(fn, delay = 250) {
   let timer;
   return (...args) => {
@@ -36,6 +38,7 @@ async function fetchJson(url, options) {
 createApp({
   data() {
     return {
+      // Режимы соответствуют двум backend-сценариям: as-of срез и сравнение дат.
       mode: "slice",
       theme: "dark",
       currentView: "overview",
@@ -74,6 +77,8 @@ createApp({
       },
 
       filters: {
+        // Все фильтры хранятся плоско, чтобы их можно было напрямую превратить
+        // в URLSearchParams и переиспользовать в быстрых действиях.
         q: "",
         code: "",
         template: "all",
@@ -143,6 +148,7 @@ createApp({
   },
 
   computed: {
+    // Computed-свойства приводят API-ответы к форме, удобной для шаблона.
     activeTemplateLabel() {
       const readable = {
         all: "Все данные",
@@ -191,6 +197,8 @@ createApp({
     },
 
     simpleRows() {
+      // Backend уже возвращает pipeline и риск, но UI пересчитывает fallback
+      // для старых ответов и тестовых данных.
       return (this.query.rows || []).map((row) => {
         const pipeline = row.pipeline || this.buildPipeline(row);
         const status = this.rowStatus(row);
@@ -265,6 +273,8 @@ createApp({
     },
 
     resultNarrative() {
+      // Короткий вывод сначала берет готовый attention_summary с backend,
+      // а при его отсутствии строит простой текст из текущей таблицы.
       if (this.mode === "compare") {
         return this.compareNarrative;
       }
@@ -349,6 +359,8 @@ createApp({
   },
 
   watch: {
+    // Автозагрузка отключается на время пакетного применения действий,
+    // чтобы один клик не запускал несколько одинаковых запросов.
     "filters.template"() {
       if (this.initialized && !this.suppressAutoLoad) this.loadData();
     },
@@ -396,6 +408,7 @@ createApp({
 
   methods: {
     async loadInitialData() {
+      // Справочники загружаются параллельно: они независимы и нужны до первого query.
       this.loading.meta = true;
       this.error = "";
       try {
@@ -427,6 +440,7 @@ createApp({
     },
 
     async loadData() {
+      // В режиме среза основной результат и readiness идут одним набором параметров.
       if (this.mode === "compare") {
         await this.loadCompare();
         return;
@@ -471,6 +485,7 @@ createApp({
     },
 
     buildQueryParams(includeDates) {
+      // Единая сборка query string защищает export, chart и таблицы от расхождения фильтров.
       const params = new URLSearchParams();
       ["q", "code", "template", "budget", "source", "post_filter"].forEach((key) => {
         const value = String(this.filters[key] || "").trim();
@@ -499,6 +514,7 @@ createApp({
     },
 
     async runWithSuppressedAutoLoad(callback, shouldScroll = false) {
+      // Пакетные изменения фильтров применяются атомарно с одним последующим loadData.
       this.suppressAutoLoad = true;
       try {
         callback();
@@ -528,6 +544,8 @@ createApp({
     },
 
     buildSmartSuggestions(text) {
+      // Умная строка не вызывает LLM: она распознает частые бюджетные сценарии
+      // и превращает их в те же actions, что быстрые кнопки и assistant.
       const value = String(text || "").trim();
       if (!value) return [];
       const lower = value.toLowerCase();
@@ -606,6 +624,7 @@ createApp({
     },
 
     async askAssistant() {
+      // Assistant получает только контекст фильтров и дат; исходные строки остаются на backend.
       if (!this.assistant.message) return;
       this.assistant.loading = true;
       this.assistant.response = null;
@@ -701,6 +720,7 @@ createApp({
     },
 
     drawChart() {
+      // Canvas рисуется вручную, чтобы не добавлять сборку или внешнюю chart-библиотеку.
       const canvas = this.$refs.chart;
       if (!canvas || this.mode !== "slice") return;
       const styles = getComputedStyle(document.documentElement);
@@ -878,6 +898,7 @@ createApp({
     },
 
     rowStatus(row) {
+      // Статус в таблице следует тем же проблемным причинам, что и backend-фильтры.
       const reasons = row.problem_reasons || [];
       if (reasons.includes("no_documents")) return "no_documents";
       if (reasons.includes("no_payments")) return "no_payments";
