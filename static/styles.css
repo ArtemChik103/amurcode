@@ -89,7 +89,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   min-height: 38px;
   border: 1px solid var(--line);
   border-radius: 7px;
@@ -113,7 +114,8 @@ button:hover {
 }
 
 input,
-select {
+select,
+textarea {
   width: 100%;
   padding: 8px 10px;
   outline: none;
@@ -121,6 +123,7 @@ select {
 
 input:focus,
 select:focus,
+textarea:focus,
 button:focus-visible {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
@@ -128,6 +131,11 @@ button:focus-visible {
 
 input::placeholder {
   color: color-mix(in srgb, var(--muted) 72%, transparent);
+}
+
+textarea {
+  min-height: 82px;
+  resize: vertical;
 }
 
 h1,
@@ -262,6 +270,11 @@ pre::-webkit-scrollbar-thumb {
   gap: 11px;
 }
 
+.advanced-stack {
+  display: grid;
+  gap: 11px;
+}
+
 label span,
 .section-title,
 .filter-group-title {
@@ -324,6 +337,10 @@ label span,
 .ghost {
   background: rgba(255, 255, 255, 0.1);
   color: #e8eef5;
+}
+
+.full-width {
+  width: 100%;
 }
 
 :root[data-theme="light"] .ghost {
@@ -418,6 +435,135 @@ label span,
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 10px;
   margin: 18px 30px 0;
+}
+
+.quick-start,
+.smart-search,
+.assistant-card,
+.answer-card {
+  margin: 18px 30px 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.section-kicker {
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.quick-start h3,
+.smart-search h3,
+.assistant-card h3,
+.answer-card h3 {
+  color: var(--heading);
+  font-size: 18px;
+}
+
+.quick-action-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.quick-action,
+.suggestions button {
+  display: grid;
+  gap: 5px;
+  min-height: 76px;
+  padding: 11px;
+  text-align: left;
+  border-color: var(--line);
+  background: var(--panel-soft);
+}
+
+.quick-action strong,
+.suggestions strong {
+  color: var(--heading);
+}
+
+.quick-action span,
+.suggestions span,
+.examples {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.smart-search label span {
+  color: var(--heading);
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.smart-search input {
+  min-height: 48px;
+  font-size: 16px;
+}
+
+.examples {
+  margin-top: 8px;
+}
+
+.suggestions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.assistant-card {
+  display: grid;
+  gap: 12px;
+}
+
+.assistant-actions,
+.assistant-response,
+.empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.assistant-response {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-soft);
+}
+
+.assistant-response p {
+  flex-basis: 100%;
+  color: var(--text);
+  line-height: 1.45;
+}
+
+.answer-card ul {
+  margin: 10px 0 0;
+  padding-left: 19px;
+}
+
+.answer-card li {
+  margin: 5px 0;
+  color: var(--text);
+}
+
+.answer-card.warning {
+  border-color: color-mix(in srgb, var(--warn) 42%, transparent);
+  background: color-mix(in srgb, var(--warn) 9%, var(--panel));
+}
+
+.answer-card.empty {
+  border-color: color-mix(in srgb, var(--danger) 36%, transparent);
+  background: color-mix(in srgb, var(--danger) 8%, var(--panel));
 }
 
 .view-tabs button {
@@ -519,6 +665,24 @@ label span,
 .workspace-grid {
   display: grid;
   gap: 18px;
+}
+
+.empty-state {
+  padding: 20px;
+  color: var(--muted);
+}
+
+.empty-state h3 {
+  color: var(--heading);
+  margin-bottom: 6px;
+}
+
+.empty-state p {
+  margin-bottom: 12px;
+}
+
+.empty-state button {
+  margin: 0 8px 8px 0;
 }
 
 .panel {
@@ -634,6 +798,87 @@ th.number {
   color: var(--muted);
 }
 
+.muted-line {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.status-pill.ok {
+  border-color: color-mix(in srgb, var(--success) 42%, transparent);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  color: var(--success);
+}
+
+.status-pill.warning {
+  border-color: color-mix(in srgb, var(--warn) 42%, transparent);
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  color: var(--warn);
+}
+
+.status-pill.danger {
+  border-color: color-mix(in srgb, var(--danger) 42%, transparent);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
+}
+
+.status-pill.neutral {
+  color: var(--muted);
+}
+
+.simple-table table {
+  min-width: 920px;
+}
+
+.readiness-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 10px;
+  padding: 16px;
+}
+
+.readiness-list div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-soft);
+}
+
+.readiness-list span {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 999px;
+  font-weight: 900;
+}
+
+.readiness-list .ok span {
+  background: color-mix(in srgb, var(--success) 18%, transparent);
+  color: var(--success);
+}
+
+.readiness-list .bad span {
+  background: color-mix(in srgb, var(--danger) 18%, transparent);
+  color: var(--danger);
+}
+
 .icon-only {
   display: inline-grid;
   width: 32px;
@@ -719,6 +964,41 @@ pre {
   white-space: pre-wrap;
 }
 
+.trace-human h4 {
+  margin: 0 0 10px;
+  color: var(--heading);
+}
+
+.trace-human dl {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 8px 12px;
+  margin: 0 0 12px;
+}
+
+.trace-human dt {
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.trace-human dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.trace-amounts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+summary {
+  cursor: pointer;
+  color: var(--heading);
+  font-weight: 800;
+}
+
 @media (max-width: 1050px) {
   #app {
     grid-template-columns: 1fr;
@@ -748,7 +1028,11 @@ pre {
   .workspace-grid,
   .panel,
   .error-banner,
-  .view-tabs {
+  .view-tabs,
+  .quick-start,
+  .smart-search,
+  .assistant-card,
+  .answer-card {
     margin-right: 14px;
     margin-left: 14px;
   }

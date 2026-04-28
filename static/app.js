@@ -1,6 +1,17 @@
 const { createApp, nextTick } = Vue;
 
 const money = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 });
+const percent = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 1 });
+
+const METRIC_LABELS = {
+  limit: "Лимиты",
+  obligation: "БО",
+  cash: "Касса",
+  agreement: "Соглашения",
+  contract: "Договоры",
+  payment: "Оплаты",
+  buau: "БУ/АУ",
+};
 
 function csvCell(value) {
   return `"${String(value ?? "").replaceAll('"', '""')}"`;
@@ -14,8 +25,8 @@ function debounce(fn, delay = 250) {
   };
 }
 
-async function fetchJson(url) {
-  const response = await fetch(url);
+async function fetchJson(url, options) {
+  const response = await fetch(url, options);
   if (!response.ok) {
     throw new Error(`Request failed: ${response.status}`);
   }
@@ -28,6 +39,19 @@ createApp({
       mode: "slice",
       theme: "dark",
       currentView: "overview",
+      smartInput: "",
+      smartSuggestions: [],
+      selectedSuggestion: null,
+      quickActions: [],
+      readinessOpen: false,
+      advancedOpen: false,
+
+      assistant: {
+        message: "",
+        loading: false,
+        response: null,
+        history: [],
+      },
 
       meta: {
         records: 0,
@@ -58,6 +82,7 @@ createApp({
         end: "",
         base: "",
         target: "",
+        post_filter: "",
       },
 
       selectedMetrics: [],
@@ -82,6 +107,7 @@ createApp({
         source: "",
         source_file: "",
         source_row: "",
+        human_summary: { amount_fields: [] },
         raw: {},
         normalized: {},
       },
@@ -102,33 +128,30 @@ createApp({
 
   computed: {
     activeTemplateLabel() {
-      const template = this.templates.find((item) => item.code === this.filters.template);
-      return template ? template.label : "Все данные";
+      const readable = {
+        all: "Все данные",
+        kik: "КИК",
+        skk: "СКК",
+        two_thirds: "2/3",
+        okv: "ОКВ",
+      };
+      return readable[this.filters.template] || "Все данные";
     },
 
     activeMetricObjects() {
+      const source = this.metrics.length
+        ? this.metrics.map((metric) => ({ ...metric, label: METRIC_LABELS[metric.code] || metric.label }))
+        : Object.entries(METRIC_LABELS).map(([code, label]) => ({ code, label }));
       if (!this.selectedMetrics.length) {
-        return this.metrics;
+        return source;
       }
       const selected = new Set(this.selectedMetrics);
-      return this.metrics.filter((metric) => selected.has(metric.code));
+      return source.filter((metric) => selected.has(metric.code));
     },
 
     activeMetricCodes() {
       const codes = this.activeMetricObjects.map((metric) => metric.code);
-      return codes.length ? codes : this.metrics.map((metric) => metric.code);
-    },
-
-    metricLabels() {
-      return {
-        limit: "Лимиты",
-        obligation: "БО",
-        cash: "Касса",
-        agreement: "Соглашения",
-        contract: "Контракты",
-        payment: "Платежи",
-        buau: "БУ/АУ",
-      };
+      return codes.length ? codes : Object.keys(METRIC_LABELS);
     },
 
     prettyTrace() {
@@ -141,50 +164,141 @@ createApp({
 
     viewTabs() {
       if (this.mode === "compare") {
-        return [{ code: "changes", label: "Изменения", count: this.compare.rows.length }];
+        return [{ code: "changes", label: "Что изменилось", count: this.compare.rows.length }];
       }
       return [
         { code: "overview", label: "Главное", count: this.query.count || 0 },
-        { code: "summary", label: "Итоги", count: this.query.rows.length },
-        { code: "records", label: "Записи", count: this.query.details.length },
+        { code: "simple", label: "Понятная таблица", count: this.simpleRows.length },
+        { code: "summary", label: "Все суммы", count: this.query.rows.length },
+        { code: "records", label: "Исходные строки", count: this.query.details.length },
+      ];
+    },
+
+    simpleRows() {
+      return (this.query.rows || []).map((row) => {
+        const plan = Number(row.limit || 0) + Number(row.obligation || 0);
+        const execution = Number(row.cash || 0) + Number(row.payment || 0) + Number(row.buau || 0);
+        const documents = Number(row.agreement || 0) + Number(row.contract || 0);
+        const status = this.rowStatus(row);
+        return {
+          object_code: row.object_code,
+          object_name: row.object_name,
+          budget: row.budget,
+          plan,
+          execution,
+          documents,
+          status,
+          statusLabel: this.rowStatusLabel(status),
+          statusClass: this.rowStatusClass(status),
+        };
+      });
+    },
+
+    resultNarrative() {
+      if (this.mode === "compare") {
+        return this.compareNarrative;
+      }
+      if (!this.query.rows.length) {
+        return {
+          title: "Ничего не найдено",
+          bullets: ["По этим условиям нет строк. Попробуйте расширить выборку или очистить поиск."],
+          severity: "empty",
+        };
+      }
+      const totals = this.query.totals || {};
+      const totalSelected = this.activeMetricCodes.reduce((sum, metric) => sum + Number(totals[metric] || 0), 0);
+      const topRow = this.query.rows[0];
+      const cashLike = Number(totals.cash || 0) + Number(totals.payment || 0) + Number(totals.buau || 0);
+      const planLike = Number(totals.limit || 0) + Number(totals.obligation || 0);
+      const sources = new Set();
+      this.query.rows.forEach((row) => String(row.sources || "").split(",").forEach((source) => source.trim() && sources.add(source.trim())));
+      const bullets = [
+        `Всего по выбранным показателям: ${this.formatMoney(totalSelected)}`,
+        `Крупнейшая строка: ${topRow.object_name || topRow.object_code || "без названия"}`,
+        `Есть данные из источников: ${sources.size || 0}`,
+      ];
+      let severity = "normal";
+      if (planLike > 0 && cashLike === 0) {
+        bullets.push("Есть плановые суммы, но нет исполнения.");
+        severity = "warning";
+      } else if (Number(totals.limit || 0) > cashLike * 2 && cashLike > 0) {
+        bullets.push("Кассовое исполнение заметно ниже лимитов.");
+        severity = "warning";
+      }
+      return { title: `Найдено объектов: ${this.query.rows.length}`, bullets, severity };
+    },
+
+    compareNarrative() {
+      if (!this.compare.rows.length) {
+        return {
+          title: "Изменений не найдено",
+          bullets: ["По выбранным датам и фильтрам нет сравнимых строк."],
+          severity: "empty",
+        };
+      }
+      const bullets = [];
+      this.activeMetricCodes.slice(0, 3).forEach((metric) => {
+        const delta = this.compare.rows.reduce((sum, row) => sum + Number(row.metrics?.[metric]?.delta || 0), 0);
+        bullets.push(`${METRIC_LABELS[metric] || metric}: изменение ${this.formatMoney(delta)}`);
+      });
+      const top = this.compare.rows[0];
+      bullets.push(`Самое большое изменение: ${top.object_name || top.object_code || "без названия"}`);
+      return { title: `Изменения за период ${this.filters.base} - ${this.filters.target}`, bullets, severity: "normal" };
+    },
+
+    emptyStateSuggestions() {
+      const result = [];
+      if (this.filters.budget) result.push({ label: "Убрать бюджет", patch: { budget: "" } });
+      if (this.filters.source) result.push({ label: "Искать во всех источниках", patch: { source: "" } });
+      if (this.filters.template !== "all") result.push({ label: "Искать во всех данных", patch: { template: "all" } });
+      if (this.filters.q || this.filters.code) result.push({ label: "Очистить поиск", patch: { q: "", code: "" } });
+      if (this.filters.start !== this.meta.snapshots[0] || this.filters.end !== this.meta.snapshots[this.meta.snapshots.length - 1]) {
+        result.push({ label: "Показать весь доступный период", patch: { start: this.meta.snapshots[0] || "", end: this.meta.snapshots[this.meta.snapshots.length - 1] || "" } });
+      }
+      if (!result.length) result.push({ label: "Сбросить лишние фильтры", patch: { q: "", code: "", budget: "", source: "", template: "all" } });
+      return result;
+    },
+
+    demoReadiness() {
+      return [
+        { label: "Данные загружены", ok: this.meta.records > 0 },
+        { label: "Есть РЧБ", ok: this.hasSource("РЧБ") },
+        { label: "Есть соглашения", ok: this.hasSource("Соглаш") },
+        { label: "Есть ГЗ", ok: this.hasSource("ГЗ") },
+        { label: "Есть БУАУ", ok: this.hasSource("БУАУ") },
+        { label: "Выборка не пустая", ok: this.mode === "compare" ? this.compare.rows.length > 0 : this.query.rows.length > 0 },
+        { label: "Источник цифры доступен", ok: (this.query.details || []).some((row) => row.id) },
+        { label: "Ошибок загрузки нет", ok: !this.quality.summary.errors },
       ];
     },
   },
 
   watch: {
     "filters.template"() {
-      if (!this.initialized) return;
-      this.loadData();
+      if (this.initialized) this.loadData();
     },
     "filters.budget"() {
-      if (!this.initialized) return;
-      this.loadData();
+      if (this.initialized) this.loadData();
     },
     "filters.source"() {
-      if (!this.initialized) return;
-      this.loadData();
+      if (this.initialized) this.loadData();
     },
     "filters.start"() {
-      if (!this.initialized) return;
-      if (this.mode === "slice") this.loadData();
+      if (this.initialized && this.mode === "slice") this.loadData();
     },
     "filters.end"() {
-      if (!this.initialized) return;
-      if (this.mode === "slice") this.loadData();
+      if (this.initialized && this.mode === "slice") this.loadData();
     },
     "filters.base"() {
-      if (!this.initialized) return;
-      if (this.mode === "compare") this.loadData();
+      if (this.initialized && this.mode === "compare") this.loadData();
     },
     "filters.target"() {
-      if (!this.initialized) return;
-      if (this.mode === "compare") this.loadData();
+      if (this.initialized && this.mode === "compare") this.loadData();
     },
     selectedMetrics: {
       deep: true,
       handler() {
-        if (!this.initialized) return;
-        this.loadData();
+        if (this.initialized) this.loadData();
       },
     },
     currentView() {
@@ -213,44 +327,28 @@ createApp({
       this.loading.meta = true;
       this.error = "";
       try {
-        const [meta, templates, metrics, quality] = await Promise.all([
+        const [meta, templates, metrics, quality, quickActions] = await Promise.all([
           fetchJson("/api/meta"),
           fetchJson("/api/catalog/templates"),
           fetchJson("/api/catalog/metrics"),
           fetchJson("/api/quality"),
+          fetchJson("/api/catalog/quick-actions"),
         ]);
-
-        this.meta = {
-          records: 0,
-          budgets: [],
-          sources: [],
-          snapshots: [],
-          objects: [],
-          ...meta,
-        };
+        this.meta = { records: 0, budgets: [], sources: [], snapshots: [], objects: [], ...meta };
         this.templates = templates;
-        this.metrics = metrics;
-        this.quality = {
-          issues: [],
-          summary: { warnings: 0, errors: 0 },
-          ...quality,
-          summary: { warnings: 0, errors: 0, ...(quality.summary || {}) },
-        };
-        this.selectedMetrics = metrics.map((metric) => metric.code);
-
+        this.metrics = metrics.map((metric) => ({ ...metric, label: METRIC_LABELS[metric.code] || metric.label }));
+        this.quickActions = quickActions;
+        this.quality = { issues: [], summary: { warnings: 0, errors: 0 }, ...quality, summary: { warnings: 0, errors: 0, ...(quality.summary || {}) } };
+        this.selectedMetrics = this.metrics.map((metric) => metric.code);
         if (this.meta.snapshots.length) {
           this.filters.start = this.meta.snapshots[0];
           this.filters.end = this.meta.snapshots[this.meta.snapshots.length - 1];
           this.filters.base = this.meta.snapshots[0];
           this.filters.target = this.meta.snapshots[this.meta.snapshots.length - 1];
         }
-
-        if (templates.some((template) => template.code === "all")) {
-          this.filters.template = "all";
-        }
       } catch (error) {
         console.error(error);
-        this.error = "Не удалось загрузить справочники. Проверьте сервер и параметры запроса.";
+        this.error = "Не удалось загрузить справочники. Проверьте сервер.";
       } finally {
         this.loading.meta = false;
       }
@@ -261,7 +359,6 @@ createApp({
         await this.loadCompare();
         return;
       }
-
       this.loading.query = true;
       this.error = "";
       try {
@@ -271,7 +368,7 @@ createApp({
         this.drawChart();
       } catch (error) {
         console.error(error);
-        this.error = "Не удалось загрузить данные. Проверьте сервер и параметры запроса.";
+        this.error = "Не удалось загрузить данные. Проверьте параметры запроса.";
       } finally {
         this.loading.query = false;
       }
@@ -287,7 +384,7 @@ createApp({
         this.compare = await fetchJson(`/api/compare?${params.toString()}`);
       } catch (error) {
         console.error(error);
-        this.error = "Не удалось загрузить сравнение. Проверьте сервер и параметры запроса.";
+        this.error = "Не удалось загрузить сравнение. Проверьте параметры запроса.";
       } finally {
         this.loading.compare = false;
       }
@@ -295,19 +392,126 @@ createApp({
 
     buildQueryParams(includeDates) {
       const params = new URLSearchParams();
-
-      ["q", "code", "template", "budget", "source"].forEach((key) => {
+      ["q", "code", "template", "budget", "source", "post_filter"].forEach((key) => {
         const value = String(this.filters[key] || "").trim();
         if (value) params.set(key, value);
       });
-
       if (includeDates) {
         if (this.filters.start) params.set("start", this.filters.start);
         if (this.filters.end) params.set("end", this.filters.end);
       }
-
       params.set("metrics", this.activeMetricCodes.join(","));
       return params;
+    },
+
+    applyQuickAction(action) {
+      this.applyAction(action);
+    },
+
+    onSmartInput() {
+      this.smartSuggestions = this.buildSmartSuggestions(this.smartInput);
+    },
+
+    buildSmartSuggestions(text) {
+      const value = String(text || "").trim();
+      if (!value) return [];
+      const lower = value.toLowerCase();
+      const suggestions = [];
+      const add = (code, title, description, action) => suggestions.push({ code, title, description, action });
+      const fullMetrics = ["limit", "obligation", "cash", "agreement", "contract", "payment", "buau"];
+
+      if (lower.includes("6105") || lower.includes("скк")) {
+        add("apply_skk", "Похоже, вы ищете СКК", "Применить готовый отчёт СКК", { mode: "slice", template: "skk", q: "", code: "", metrics: fullMetrics });
+      }
+      if (lower.includes("978") || lower.includes("кик")) {
+        add("apply_kik", "Похоже, вы ищете КИК", "Применить готовый отчёт КИК", { mode: "slice", template: "kik", q: "", code: "", metrics: ["limit", "obligation", "cash", "agreement", "contract", "payment"] });
+      }
+      if (lower.includes("970") || lower.includes("2/3")) {
+        add("apply_two_thirds", "Похоже, вы ищете 2/3", "Применить отчёт по высвобождаемым средствам", { mode: "slice", template: "two_thirds", q: "", code: "", metrics: ["limit", "obligation", "cash", "agreement"] });
+      }
+      if (["окв", "капитал", "капвлож"].some((word) => lower.includes(word))) {
+        add("apply_okv", "Похоже, вы ищете ОКВ", "Показать объекты капитальных вложений", { mode: "slice", template: "okv", q: "", code: "", metrics: ["limit", "obligation", "cash", "contract", "payment", "buau"] });
+      }
+      if (["сравн", "измен", "динамик"].some((word) => lower.includes(word))) {
+        add("apply_compare", "Сравнить периоды", "Показать изменения между первой и последней датой", { mode: "compare", template: lower.includes("скк") ? "skk" : this.filters.template, metrics: this.activeMetricCodes });
+      }
+      if (["касс", "исполн", "платеж"].some((word) => lower.includes(word))) {
+        add("apply_cash", "Показать исполнение и оплаты", "Оставить кассу, платежи и выплаты БУ/АУ", { mode: this.mode, template: this.filters.template, q: value, metrics: ["cash", "payment", "buau"] });
+      }
+      if (["лимит", "план"].some((word) => lower.includes(word))) {
+        add("apply_plan", "Показать плановые суммы", "Оставить лимиты и обязательства", { mode: this.mode, template: this.filters.template, q: value, metrics: ["limit", "obligation"] });
+      }
+      add("apply_search", "Искать по введённому тексту", "Найти объект, бюджет, получателя или документ", { mode: "slice", template: this.filters.template, q: value, code: /^\d+$/.test(value) ? value : "", metrics: this.activeMetricCodes });
+      return suggestions;
+    },
+
+    applyFirstSuggestion() {
+      if (!this.smartSuggestions.length) this.onSmartInput();
+      if (this.smartSuggestions[0]) this.applySmartSuggestion(this.smartSuggestions[0]);
+    },
+
+    applySmartSuggestion(suggestion) {
+      this.selectedSuggestion = suggestion;
+      this.applyAction(suggestion.action || {});
+    },
+
+    async askAssistant() {
+      if (!this.assistant.message) return;
+      this.assistant.loading = true;
+      this.assistant.response = null;
+      this.error = "";
+      try {
+        const response = await fetchJson("/api/assistant", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            message: this.assistant.message,
+            context: {
+              mode: this.mode,
+              template: this.filters.template,
+              selected_metrics: this.activeMetricCodes,
+              available_dates: this.meta.snapshots,
+            },
+          }),
+        });
+        this.assistant.response = response;
+        this.assistant.history.unshift({ question: this.assistant.message, response });
+      } catch (error) {
+        console.error(error);
+        this.error = "Помощник недоступен. Можно использовать быстрые действия или умную строку.";
+      } finally {
+        this.assistant.loading = false;
+      }
+    },
+
+    applyAssistantAction(action) {
+      this.applyAction(action || {});
+    },
+
+    applyAction(action) {
+      if (action.mode) this.mode = action.mode;
+      if (action.template) this.filters.template = action.template;
+      if (action.q !== undefined) this.filters.q = action.q;
+      if (action.code !== undefined) this.filters.code = action.code;
+      if (action.budget !== undefined) this.filters.budget = action.budget;
+      if (action.source !== undefined) this.filters.source = action.source;
+      this.filters.post_filter = action.post_filter || "";
+      if (action.metrics?.length) this.selectedMetrics = action.metrics;
+      if (this.mode === "compare") {
+        this.filters.base = action.base || this.meta.snapshots[0] || "";
+        this.filters.target = action.target || this.meta.snapshots[this.meta.snapshots.length - 1] || "";
+        this.currentView = "changes";
+      } else {
+        this.filters.start = action.start || this.meta.snapshots[0] || "";
+        this.filters.end = action.end || this.meta.snapshots[this.meta.snapshots.length - 1] || "";
+        this.currentView = "overview";
+      }
+      this.loadData();
+    },
+
+    applyEmptySuggestion(item) {
+      Object.assign(this.filters, item.patch || {});
+      this.loadData();
     },
 
     scheduleLoad() {
@@ -316,9 +520,7 @@ createApp({
     },
 
     scheduleChartRedraw() {
-      if (this.chartRedraw) {
-        this.chartRedraw();
-      }
+      if (this.chartRedraw) this.chartRedraw();
     },
 
     toggleTheme() {
@@ -340,32 +542,26 @@ createApp({
       const chartAxis = styles.getPropertyValue("--chart-axis").trim() || "#63717b";
       const chartText = styles.getPropertyValue("--chart-text").trim() || "#63717b";
       const chartLine = styles.getPropertyValue("--chart-line").trim() || "#0f766e";
-
       const ratio = window.devicePixelRatio || 1;
       const width = canvas.clientWidth || canvas.parentElement?.clientWidth || 640;
       const height = canvas.clientHeight || Number(canvas.getAttribute("height")) || 280;
       canvas.width = Math.floor(width * ratio);
       canvas.height = Math.floor(height * ratio);
-
       const ctx = canvas.getContext("2d");
       ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
       ctx.clearRect(0, 0, width, height);
-
       const points = (this.query.timeline || []).map((row) => ({
         date: row.date,
         value: this.activeMetricCodes.reduce((sum, metric) => sum + Number(row[metric] || 0), 0),
       }));
-
       if (!points.length) {
         ctx.fillStyle = chartText;
         ctx.font = "14px Arial";
         ctx.fillText("Нет данных", 24, 36);
         return;
       }
-
       const pad = { left: 72, right: 20, top: 20, bottom: 38 };
       const max = Math.max(1, ...points.map((point) => point.value));
-
       ctx.strokeStyle = chartAxis;
       ctx.lineWidth = 1;
       ctx.beginPath();
@@ -373,7 +569,6 @@ createApp({
       ctx.lineTo(pad.left, height - pad.bottom);
       ctx.lineTo(width - pad.right, height - pad.bottom);
       ctx.stroke();
-
       [0, 0.5, 1].forEach((tick) => {
         const y = height - pad.bottom - tick * (height - pad.top - pad.bottom);
         ctx.fillStyle = chartText;
@@ -385,19 +580,14 @@ createApp({
         ctx.lineTo(width - pad.right, y);
         ctx.stroke();
       });
-
       this.drawLine(ctx, points, chartLine, pad, width, height, max);
-
       ctx.fillStyle = chartText;
       ctx.font = "12px Arial";
-      ctx.fillText("Выбранные метрики", Math.max(84, width - 180), 16);
-      ctx.fillStyle = chartText;
       ctx.fillText(points[0].date, pad.left, height - 12);
       ctx.fillText(points[points.length - 1].date, Math.max(pad.left, width - pad.right - 78), height - 12);
     },
 
     drawLine(ctx, points, color, pad, width, height, max) {
-      if (!points.length) return;
       const chartWidth = width - pad.left - pad.right;
       const chartHeight = height - pad.top - pad.bottom;
       ctx.strokeStyle = color;
@@ -410,15 +600,6 @@ createApp({
         else ctx.lineTo(x, y);
       });
       ctx.stroke();
-
-      ctx.fillStyle = color;
-      points.forEach((point, index) => {
-        const x = pad.left + (points.length === 1 ? 0 : (index / (points.length - 1)) * chartWidth);
-        const y = height - pad.bottom - (point.value / max) * chartHeight;
-        ctx.beginPath();
-        ctx.arc(x, y, 3, 0, Math.PI * 2);
-        ctx.fill();
-      });
     },
 
     setMode(mode) {
@@ -439,106 +620,91 @@ createApp({
       this.filters.template = "all";
       this.filters.budget = "";
       this.filters.source = "";
+      this.filters.post_filter = "";
+      this.smartInput = "";
+      this.smartSuggestions = [];
       this.loadData();
     },
 
     async openTrace(id) {
       this.loading.trace = true;
       this.error = "";
-      this.trace = {
-        id: "",
-        source: "",
-        source_file: "",
-        source_row: "",
-        raw: {},
-        normalized: {},
-      };
+      this.trace = { id: "", source: "", source_file: "", source_row: "", human_summary: { amount_fields: [] }, raw: {}, normalized: {} };
       this.$refs.traceDialog?.showModal();
-
       try {
         this.trace = await fetchJson(`/api/trace?id=${encodeURIComponent(id)}`);
       } catch (error) {
         console.error(error);
-        this.error = "Не удалось загрузить исходную строку.";
+        this.error = "Не удалось загрузить источник цифры.";
       } finally {
         this.loading.trace = false;
       }
     },
 
     exportCsv() {
-      const createdAt = new Date().toISOString();
+      const createdAt = new Date().toLocaleString("ru-RU");
       const metricCodes = this.activeMetricCodes;
-      let lines;
-
+      const header = [
+        ["Отчёт", this.activeTemplateLabel],
+        ["Дата формирования", createdAt],
+        ["Период", this.mode === "compare" ? `${this.filters.base} - ${this.filters.target}` : `${this.filters.start} - ${this.filters.end}`],
+        ["Показатели", this.activeMetricObjects.map((metric) => metric.label).join(", ")],
+        [],
+      ];
+      let rows;
       if (this.mode === "compare") {
-        const metricHeaders = this.activeMetricObjects.flatMap((metric) => [
-          `${metric.label} база`,
-          `${metric.label} цель`,
-          `${metric.label} дельта`,
-        ]);
-        lines = [
-          [
-            "Дата формирования",
-            "Режим",
-            "Шаблон",
-            "База",
-            "Цель",
-            "Метрики",
-            "Код",
-            "Объект",
-            "Бюджет",
-            ...metricHeaders,
-          ],
-          ...this.compare.rows.map((row) => [
-            createdAt,
-            "Сравнение",
-            this.activeTemplateLabel,
-            this.filters.base,
-            this.filters.target,
-            metricCodes.join(","),
-            row.object_code,
-            row.object_name,
-            row.budget,
-            ...metricCodes.flatMap((metric) => {
-              const values = row.metrics?.[metric] || {};
-              return [values.base, values.target, values.delta];
-            }),
-          ]),
-        ];
+        const metricHeaders = this.activeMetricObjects.flatMap((metric) => [`${metric.label} база`, `${metric.label} цель`, `${metric.label} изменение`]);
+        rows = [["Код", "Объект", "Бюджет", ...metricHeaders], ...this.compare.rows.map((row) => [row.object_code, row.object_name, row.budget, ...metricCodes.flatMap((metric) => {
+          const values = row.metrics?.[metric] || {};
+          return [values.base, values.target, values.delta];
+        })])];
       } else {
-        lines = [
-          [
-            "Дата формирования",
-            "Режим",
-            "Шаблон",
-            "Метрики",
-            "Код",
-            "Объект",
-            "Бюджет",
-            "Источники",
-            ...this.activeMetricObjects.map((metric) => metric.label),
-          ],
-          ...this.query.rows.map((row) => [
-            createdAt,
-            "Срез",
-            this.activeTemplateLabel,
-            metricCodes.join(","),
-            row.object_code,
-            row.object_name,
-            row.budget,
-            row.sources,
-            ...metricCodes.map((metric) => row[metric]),
-          ]),
-        ];
+        rows = [["Код", "Объект", "Бюджет", "Источники", ...this.activeMetricObjects.map((metric) => metric.label)], ...this.query.rows.map((row) => [row.object_code, row.object_name, row.budget, row.sources, ...metricCodes.map((metric) => row[metric])])];
       }
-
-      const csv = lines.map((line) => line.map(csvCell).join(";")).join("\n");
+      const csv = [...header, ...rows].map((line) => line.map(csvCell).join(";")).join("\n");
       const blob = new Blob(["\ufeff", csv], { type: "text/csv;charset=utf-8" });
       const link = document.createElement("a");
       link.href = URL.createObjectURL(blob);
-      link.download = "analytics_selection.csv";
+      const suffix = this.mode === "compare" ? `compare_${this.filters.template}_${this.filters.base}_${this.filters.target}` : `${this.filters.template}_${this.filters.end || "period"}`;
+      link.download = `analytics_${suffix}.csv`;
       link.click();
       URL.revokeObjectURL(link.href);
+    },
+
+    rowStatus(row) {
+      const plan = Number(row.limit || 0) + Number(row.obligation || 0);
+      const execution = Number(row.cash || 0) + Number(row.payment || 0) + Number(row.buau || 0);
+      const documents = Number(row.agreement || 0) + Number(row.contract || 0);
+      if (plan > 0 && execution === 0) return "no_execution";
+      if (plan > 0 && execution / plan < 0.25) return "low_execution";
+      if (execution >= plan && plan > 0) return "executed";
+      if (documents > 0 && execution === 0) return "has_documents_no_payment";
+      return "normal";
+    },
+
+    rowStatusLabel(status) {
+      return {
+        no_execution: "Нет кассы",
+        low_execution: "Низкое исполнение",
+        executed: "Исполнено",
+        has_documents_no_payment: "Есть документы, нет оплат",
+        normal: "Без явных проблем",
+      }[status] || "Без явных проблем";
+    },
+
+    rowStatusClass(status) {
+      return {
+        no_execution: "danger",
+        low_execution: "warning",
+        executed: "ok",
+        has_documents_no_payment: "warning",
+        normal: "neutral",
+      }[status] || "neutral";
+    },
+
+    hasSource(fragment) {
+      const lower = fragment.toLowerCase();
+      return (this.meta.sources || []).some((source) => String(source).toLowerCase().includes(lower));
     },
 
     formatMoney(value) {
@@ -546,22 +712,20 @@ createApp({
     },
 
     formatPercent(value) {
-      if (value === null || value === undefined || Number.isNaN(Number(value))) {
-        return "0%";
-      }
-      return `${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 1 }).format(Number(value))}%`;
+      if (value === null || value === undefined || Number.isNaN(Number(value))) return "0%";
+      return `${percent.format(Number(value))}%`;
     },
 
     metricHint(code) {
       return {
-        limit: "Доведенные лимиты",
-        obligation: "Принятые обязательства",
-        cash: "Кассовые выплаты",
-        agreement: "Суммы соглашений",
-        contract: "Контракты и договоры",
-        payment: "Факты оплаты",
-        buau: "Выплаты учреждений",
-      }[code] || "Показатель выборки";
+        limit: "сколько доведено",
+        obligation: "сколько принято обязательств",
+        cash: "сколько фактически выбыло",
+        agreement: "суммы соглашений",
+        contract: "суммы договоров",
+        payment: "фактические оплаты",
+        buau: "выплаты учреждений",
+      }[code] || "показатель";
     },
 
     detailAmount(row) {

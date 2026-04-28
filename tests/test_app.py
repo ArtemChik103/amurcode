@@ -108,6 +108,32 @@ class DataLoadTests(unittest.TestCase):
         self.assertTrue(app.matches_template({"object_code_norm": "00000970"}, "two_thirds"))
         self.assertTrue(app.matches_template({"object_code_norm": "", "kvr": "414"}, "okv"))
 
+    def test_quick_actions_include_core_scenarios(self):
+        self.assertGreaterEqual(len(app.quick_actions_payload()), 6)
+        for code in ("show_skk", "show_kik", "show_two_thirds", "show_okv"):
+            self.assertIn(code, app.QUICK_ACTIONS)
+            self.assertIn("metrics", app.QUICK_ACTIONS[code])
+
+    def test_assistant_rule_based_core_intents(self):
+        skk = app.assistant_rule_based("Покажи СКК", {})
+        self.assertEqual(skk["action"]["template"], "skk")
+
+        city = app.assistant_rule_based("6105 Благовещенск", {})
+        self.assertEqual(city["action"]["template"], "skk")
+        self.assertIn("Благовещенск", city["action"]["q"])
+
+        compare = app.assistant_rule_based("сравни СКК", {})
+        self.assertEqual(compare["intent"], "run_compare")
+        self.assertEqual(compare["action"]["mode"], "compare")
+
+        explain = app.assistant_rule_based("что такое БО", {})
+        self.assertEqual(explain["intent"], "explain_metric")
+
+    def test_rag_loader_reads_markdown_documents(self):
+        documents = app.load_rag_documents()
+        self.assertGreaterEqual(len(documents), 6)
+        self.assertTrue(any("БО" in item["content"] for item in documents))
+
 
 class HttpTests(unittest.TestCase):
     @classmethod
@@ -123,10 +149,15 @@ class HttpTests(unittest.TestCase):
         cls.server.server_close()
         cls.thread.join(timeout=5)
 
-    def request(self, path):
+    def request(self, path, method="GET", payload=None):
         conn = HTTPConnection("127.0.0.1", self.port, timeout=10)
         try:
-            conn.request("GET", path)
+            body = None
+            headers = {}
+            if payload is not None:
+                body = json.dumps(payload).encode("utf-8")
+                headers["Content-Type"] = "application/json"
+            conn.request(method, path, body=body, headers=headers)
             response = conn.getresponse()
             body = response.read()
             return response.status, response.getheader("Content-Type"), body
@@ -154,13 +185,14 @@ class HttpTests(unittest.TestCase):
         status, content_type, body = self.request("/")
         self.assertEqual(status, 200)
         self.assertIn("text/html", content_type)
-        self.assertIn("Конструктор аналитических выборок", body.decode("utf-8"))
+        self.assertIn("Простая аналитика расходов", body.decode("utf-8"))
 
 
     def test_catalog_quality_trace_and_compare_endpoints_return_json(self):
         for path in (
             "/api/catalog/templates",
             "/api/catalog/metrics",
+            "/api/catalog/quick-actions",
             "/api/catalog/dates",
             "/api/catalog/sources",
             "/api/catalog/budgets",
@@ -179,6 +211,19 @@ class HttpTests(unittest.TestCase):
         payload = json.loads(body.decode("utf-8"))
         self.assertEqual(payload["id"], record_id)
         self.assertIn("raw", payload)
+        self.assertIn("human_summary", payload)
+
+    def test_assistant_endpoint_returns_rule_based_json_without_groq(self):
+        status, content_type, body = self.request(
+            "/api/assistant",
+            method="POST",
+            payload={"message": "Покажи СКК", "context": {"mode": "slice", "template": "all"}},
+        )
+        self.assertEqual(status, 200)
+        self.assertIn("application/json", content_type)
+        payload = json.loads(body.decode("utf-8"))
+        self.assertIn(payload["mode"], {"rule_based", "llm"})
+        self.assertEqual(payload["action"]["template"], "skk")
 
 
 class StaticFilesTests(unittest.TestCase):
@@ -192,6 +237,8 @@ class StaticFilesTests(unittest.TestCase):
         self.assertIn("/api/query", script)
         self.assertIn("/api/compare", script)
         self.assertIn("/api/trace", script)
+        self.assertIn("/api/catalog/quick-actions", script)
+        self.assertIn("/api/assistant", script)
         self.assertIn("grid-template-columns", styles)
 
     def test_vue_frontend_is_declarative(self):
@@ -209,8 +256,24 @@ class StaticFilesTests(unittest.TestCase):
             "loadCompare",
             "openTrace",
             "exportCsv",
+            "quickActions",
+            "smartInput",
+            "assistant",
+            "applyQuickAction",
+            "buildSmartSuggestions",
+            "askAssistant",
+            "applyAssistantAction",
+            "resultNarrative",
+            "simpleRows",
         ):
             self.assertIn(marker, script)
+        for marker in (
+            "Быстрый старт",
+            "Спросить помощника",
+            "Короткий вывод",
+            "Понятная таблица",
+        ):
+            self.assertIn(marker, index)
         for legacy_marker in (
             "document.querySelector",
             "innerHTML =",

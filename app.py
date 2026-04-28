@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import re
 import sys
 from collections import defaultdict
@@ -10,11 +11,13 @@ from datetime import datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+from urllib.request import Request, urlopen
 
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "case"
 STATIC_DIR = ROOT / "static"
+RAG_DIR = ROOT / "docs" / "rag"
 QUALITY_ISSUES: list[dict] = []
 LOAD_STATS: dict[str, dict[str, int]] = {}
 METRIC_KEYS = ["limit", "obligation", "cash", "agreement", "contract", "payment", "buau"]
@@ -33,6 +36,61 @@ TEMPLATES = {
     "skk": {"label": "СКК", "description": "КЦСР содержит 6105 с 6-й позиции"},
     "two_thirds": {"label": "2/3", "description": "КЦСР содержит 970 с 6-й позиции"},
     "okv": {"label": "ОКВ", "description": "Капитальные вложения по КВР"},
+}
+QUICK_ACTIONS = {
+    "show_skk": {
+        "label": "Показать СКК",
+        "description": "Сведения по специальным казначейским кредитам",
+        "mode": "slice",
+        "template": "skk",
+        "metrics": ["limit", "obligation", "cash", "agreement", "contract", "payment", "buau"],
+    },
+    "show_kik": {
+        "label": "Показать КИК",
+        "description": "Инфраструктурные кредиты",
+        "mode": "slice",
+        "template": "kik",
+        "metrics": ["limit", "obligation", "cash", "agreement", "contract", "payment"],
+    },
+    "show_two_thirds": {
+        "label": "Показать 2/3",
+        "description": "Высвобождаемые средства",
+        "mode": "slice",
+        "template": "two_thirds",
+        "metrics": ["limit", "obligation", "cash", "agreement"],
+    },
+    "show_okv": {
+        "label": "Показать ОКВ",
+        "description": "Объекты капитальных вложений",
+        "mode": "slice",
+        "template": "okv",
+        "metrics": ["limit", "obligation", "cash", "contract", "payment", "buau"],
+    },
+    "compare_skk": {
+        "label": "Сравнить СКК",
+        "description": "Что изменилось по СКК между первой и последней датой",
+        "mode": "compare",
+        "template": "skk",
+        "metrics": ["limit", "obligation", "cash"],
+    },
+    "execution_problems": {
+        "label": "Где проблемы с исполнением",
+        "description": "Лимиты есть, а касса низкая или отсутствует",
+        "mode": "slice",
+        "template": "all",
+        "metrics": ["limit", "cash", "payment", "buau"],
+        "post_filter": "low_execution",
+    },
+}
+ASSISTANT_INTENTS = {
+    "run_query",
+    "run_compare",
+    "explain_metric",
+    "explain_template",
+    "find_object",
+    "show_execution_problems",
+    "show_source",
+    "help",
 }
 CAPITAL_KVR = {"400", "410", "411", "412", "413", "414", "415", "416", "417"}
 
@@ -160,6 +218,17 @@ def selected_metrics(params: dict[str, list[str]] | None = None) -> list[str]:
         return list(METRIC_KEYS)
     result = [metric for metric in raw.split(",") if metric in METRIC_KEYS]
     return result or list(METRIC_KEYS)
+
+
+def default_date_range() -> tuple[str, str]:
+    snapshots = STORE.meta.get("snapshots", []) if "STORE" in globals() else []
+    if not snapshots:
+        return "", ""
+    return snapshots[0], snapshots[-1]
+
+
+def quick_actions_payload() -> list[dict]:
+    return [{"code": code, **action} for code, action in QUICK_ACTIONS.items()]
 
 
 def matches_template(record: dict, template: str) -> bool:
@@ -582,6 +651,22 @@ def aggregate(records: list[dict], metrics: list[str] | None = None) -> dict:
     }
 
 
+def apply_aggregate_post_filter(result: dict, post_filter: str, metrics: list[str]) -> dict:
+    if post_filter != "low_execution":
+        return result
+    rows = []
+    for row in result.get("rows", []):
+        plan = float(row.get("limit") or 0) + float(row.get("obligation") or 0)
+        execution = float(row.get("cash") or 0) + float(row.get("payment") or 0) + float(row.get("buau") or 0)
+        if plan > 0 and (execution == 0 or execution / plan < 0.25):
+            rows.append(row)
+    filtered = dict(result)
+    filtered["rows"] = rows
+    filtered["totals"] = {metric: sum(float(row.get(metric) or 0) for row in rows) for metric in metrics}
+    filtered["count"] = len(rows)
+    return filtered
+
+
 def catalog_objects(records: list[dict], params: dict[str, list[str]]) -> list[dict]:
     query = params.get("q", [""])[0].strip().lower()
     template = params.get("template", ["all"])[0].strip() or "all"
@@ -610,15 +695,233 @@ def catalog_objects(records: list[dict], params: dict[str, list[str]]) -> list[d
     return objects
 
 
+def load_rag_documents() -> list[dict]:
+    documents = []
+    if not RAG_DIR.exists():
+        return documents
+    for path in sorted(RAG_DIR.glob("*.md")):
+        text = path.read_text(encoding="utf-8").strip()
+        if text:
+            documents.append({"source_file": relative_source(path), "title": path.stem, "content": text})
+    return documents
+
+
+def retrieve_rag_context(message: str, limit: int = 4) -> str:
+    query_words = {word for word in re.findall(r"[0-9A-Za-zА-Яа-яЁё/]+", message.lower()) if len(word) > 1}
+    scored = []
+    for document in load_rag_documents():
+        content = document["content"].lower()
+        score = sum(1 for word in query_words if word in content)
+        if score:
+            scored.append((score, document))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    selected = [document for _, document in scored[:limit]]
+    if not selected and load_rag_documents():
+        selected = load_rag_documents()[:1]
+    return "\n\n".join(f"[{item['source_file']}]\n{item['content']}" for item in selected)
+
+
+def clean_search_text(message: str) -> str:
+    text = re.sub(r"\b(покажи|показать|найди|найти|сравни|сравнить|что|такое|где|есть|по|в|и|с|со)\b", " ", message, flags=re.I)
+    text = re.sub(r"\b(скк|кик|окв|лимит\w*|касс\w*|исполн\w*|платеж\w*|оплат\w*|динамик\w*|измен\w*)\b", " ", text, flags=re.I)
+    text = re.sub(r"\b(6105|978|970|2/3)\b", " ", text)
+    return " ".join(text.split())
+
+
+def assistant_rule_based(message: str, context: dict | None = None) -> dict:
+    context = context or {}
+    lower = message.lower()
+    start, end = default_date_range()
+    action = {
+        "mode": context.get("mode") or "slice",
+        "template": context.get("template") or "all",
+        "q": "",
+        "code": "",
+        "budget": "",
+        "source": "",
+        "start": start,
+        "end": end,
+        "metrics": context.get("selected_metrics") or ["limit", "obligation", "cash"],
+    }
+    intent = "run_query"
+    confidence = 0.62
+
+    if "скк" in lower or "6105" in lower:
+        action["template"] = "skk"
+        confidence = 0.9
+    elif "кик" in lower or "978" in lower:
+        action["template"] = "kik"
+        confidence = 0.88
+    elif "2/3" in lower or "970" in lower:
+        action["template"] = "two_thirds"
+        confidence = 0.88
+    elif "окв" in lower or "капитал" in lower or "капвлож" in lower:
+        action["template"] = "okv"
+        confidence = 0.86
+
+    if any(word in lower for word in ("сравн", "измен", "динамик")):
+        intent = "run_compare"
+        action["mode"] = "compare"
+        action["base"] = start
+        action["target"] = end
+        confidence = max(confidence, 0.82)
+
+    if any(word in lower for word in ("касс", "исполн", "платеж", "оплат")):
+        action["metrics"] = ["cash", "payment", "buau"]
+    if any(word in lower for word in ("лимит", "план", "бо")):
+        action["metrics"] = ["limit", "obligation"]
+    if any(word in lower for word in ("проблем", "нет касс", "низк")):
+        intent = "show_execution_problems"
+        action["template"] = "all"
+        action["metrics"] = ["limit", "cash", "payment", "buau"]
+
+    if any(phrase in lower for phrase in ("что такое", "объясни", "расскажи")):
+        intent = "explain_metric" if any(word in lower for word in ("бо", "касс", "лимит", "метрик")) else "explain_template"
+        confidence = max(confidence, 0.75)
+
+    search_text = clean_search_text(message)
+    if intent in {"run_query", "run_compare", "find_object"} and search_text:
+        action["q"] = search_text
+
+    rag_context = retrieve_rag_context(message, limit=2)
+    explanation = ""
+    if intent.startswith("explain") and rag_context:
+        explanation = " " + " ".join(rag_context.split())[:700]
+
+    return {
+        "mode": "rule_based",
+        "intent": intent,
+        "confidence": confidence,
+        "message": f"Я понял запрос как {'сравнение' if intent == 'run_compare' else 'выборку'}: {TEMPLATES.get(action['template'], TEMPLATES['all'])['label']}.{explanation}",
+        "action": action,
+        "alternatives": [
+            {"label": "Искать во всех данных", "action": {"mode": "slice", "template": "all", "q": search_text or message, "metrics": action["metrics"]}},
+        ],
+        "rag_context": rag_context,
+    }
+
+
+def validate_assistant_action(action: dict, fallback: dict) -> dict:
+    result = dict(fallback)
+    if not isinstance(action, dict):
+        return result
+    if action.get("mode") in {"slice", "compare"}:
+        result["mode"] = action["mode"]
+    if action.get("template") in TEMPLATES:
+        result["template"] = action["template"]
+    for key in ("q", "code", "budget", "source", "start", "end", "base", "target"):
+        if key in action:
+            result[key] = str(action.get(key) or "")[:200]
+    metrics = action.get("metrics")
+    if isinstance(metrics, list):
+        filtered = [metric for metric in metrics if metric in METRIC_KEYS]
+        if filtered:
+            result["metrics"] = filtered
+    return result
+
+
+def assistant_llm(message: str, context: dict, rag_context: str) -> dict:
+    api_key = os.environ.get("GROQ_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("GROQ_API_KEY is not set")
+    model = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b").strip() or "openai/gpt-oss-120b"
+    start, end = default_date_range()
+    system_prompt = (
+        "Ты помощник конструктора бюджетных выборок. Ты не считаешь суммы сам. "
+        "Верни только JSON без markdown. Допустимые intent: "
+        + ", ".join(sorted(ASSISTANT_INTENTS))
+        + ". Допустимые шаблоны: "
+        + ", ".join(TEMPLATES)
+        + ". Допустимые метрики: "
+        + ", ".join(METRIC_KEYS)
+        + ". JSON: {\"intent\":\"run_query\",\"confidence\":0.8,\"message\":\"...\",\"action\":{...},\"alternatives\":[]}."
+    )
+    user_payload = {
+        "message": message,
+        "context": context,
+        "available_dates": {"start": start, "end": end, "all": STORE.meta.get("snapshots", [])},
+        "templates": {code: item["description"] for code, item in TEMPLATES.items()},
+        "metrics": METRICS,
+        "rag_context": rag_context,
+    }
+    body = json.dumps(
+        {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+            ],
+            "temperature": 0.1,
+            "response_format": {"type": "json_object"},
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    request = Request(
+        "https://api.groq.com/openai/v1/chat/completions",
+        data=body,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlopen(request, timeout=15) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    content = payload["choices"][0]["message"]["content"]
+    parsed = json.loads(content)
+    fallback = assistant_rule_based(message, context)
+    intent = parsed.get("intent") if parsed.get("intent") in ASSISTANT_INTENTS else fallback["intent"]
+    action = validate_assistant_action(parsed.get("action", {}), fallback["action"])
+    return {
+        "mode": "llm",
+        "intent": intent,
+        "confidence": float(parsed.get("confidence") or fallback["confidence"]),
+        "message": str(parsed.get("message") or fallback["message"])[:1000],
+        "action": action,
+        "alternatives": parsed.get("alternatives") if isinstance(parsed.get("alternatives"), list) else fallback["alternatives"],
+        "rag_context": rag_context,
+    }
+
+
+def assistant_response(message: str, context: dict | None = None) -> dict:
+    context = context or {}
+    fallback = assistant_rule_based(message, context)
+    if os.environ.get("ASSISTANT_ENABLED", "auto").lower() == "false":
+        return fallback
+    if not os.environ.get("GROQ_API_KEY", "").strip():
+        return fallback
+    try:
+        return assistant_llm(message, context, fallback.get("rag_context", ""))
+    except Exception:
+        return fallback
+
+
 def trace_record(record_id: str) -> dict | None:
     for record in STORE.records:
         if record.get("id") == record_id:
             normalized = {key: value for key, value in record.items() if key not in {"raw"}}
+            amount_fields = []
+            for key, label in (
+                ("limit", "Лимиты"),
+                ("obligation", "БО"),
+                ("cash", "Касса"),
+                ("agreement", "Соглашения"),
+                ("contract", "Договоры"),
+                ("payment", "Оплаты"),
+                ("buau", "БУ/АУ"),
+            ):
+                value = float(record.get(key) or 0)
+                if value:
+                    amount_fields.append({"label": label, "field": key, "value": value})
             return {
                 "id": record.get("id"),
                 "source": record.get("source"),
                 "source_file": record.get("source_file", ""),
                 "source_row": record.get("source_row", ""),
+                "human_summary": {
+                    "title": "Сумма из исходной строки",
+                    "date": record.get("event_date") or record.get("snapshot") or "",
+                    "object": record.get("object_name") or record.get("object_code") or "",
+                    "document": record.get("document_number") or record.get("description") or "",
+                    "amount_fields": amount_fields,
+                },
                 "raw": record.get("raw", {}),
                 "normalized": normalized,
             }
@@ -692,7 +995,10 @@ class Handler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/query":
             params = parse_qs(parsed.query)
             filtered = apply_filters(STORE.records, params)
-            self.write_json(aggregate(filtered, selected_metrics(params)))
+            metrics = selected_metrics(params)
+            result = aggregate(filtered, metrics)
+            post_filter = params.get("post_filter", [""])[0].strip()
+            self.write_json(apply_aggregate_post_filter(result, post_filter, metrics))
             return
         if parsed.path == "/api/compare":
             self.write_json(compare_periods(parse_qs(parsed.query)))
@@ -725,10 +1031,30 @@ class Handler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/catalog/metrics":
             self.write_json([{"code": code, "label": label} for code, label in METRICS.items()])
             return
+        if parsed.path == "/api/catalog/quick-actions":
+            self.write_json(quick_actions_payload())
+            return
         if parsed.path == "/api/catalog/objects":
             self.write_json(catalog_objects(STORE.records, parse_qs(parsed.query)))
             return
         super().do_GET()
+
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/assistant":
+            try:
+                length = int(self.headers.get("Content-Length", "0") or "0")
+                payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+                message = str(payload.get("message") or "").strip()
+                context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+                if not message:
+                    self.write_json({"error": "message_required"}, status=400)
+                    return
+                self.write_json(assistant_response(message, context))
+            except json.JSONDecodeError:
+                self.write_json({"error": "invalid_json"}, status=400)
+            return
+        self.write_json({"error": "not_found"}, status=404)
 
     def write_json(self, payload: object, status: int = 200) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
