@@ -1,0 +1,475 @@
+from __future__ import annotations
+
+import csv
+import json
+import re
+import sys
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import datetime
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+
+ROOT = Path(__file__).resolve().parent
+DATA_DIR = ROOT / "case"
+STATIC_DIR = ROOT / "static"
+
+SNAPSHOT_RE = re.compile(r"на\s+(\d{2}\.\d{2}\.\d{4})")
+MONTHS = {
+    "январь": 1,
+    "февраль": 2,
+    "март": 3,
+    "апрель": 4,
+    "май": 5,
+    "июнь": 6,
+    "июль": 7,
+    "август": 8,
+    "сентябрь": 9,
+    "октябрь": 10,
+    "ноябрь": 11,
+    "декабрь": 12,
+}
+
+
+def parse_amount(value: object) -> float:
+    if value is None:
+        return 0.0
+    text = str(value).strip().replace("\xa0", " ")
+    if not text:
+        return 0.0
+    text = text.replace(" ", "")
+    if "," in text and "." in text:
+        text = text.replace(",", "")
+    elif "," in text:
+        text = text.replace(",", ".")
+    try:
+        return float(text)
+    except ValueError:
+        return 0.0
+
+
+def parse_date(value: object) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    for fmt in ("%d.%m.%Y", "%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt).date().isoformat()
+        except ValueError:
+            pass
+    return text[:10]
+
+
+def normalize_code(value: object) -> str:
+    return re.sub(r"[^0-9A-Za-zА-Яа-я]", "", str(value or "")).upper()
+
+
+def display_code(value: object) -> str:
+    return str(value or "").strip()
+
+
+def rcb_snapshot_from_rows(rows: list[list[str]], fallback_name: str) -> str:
+    for row in rows[:8]:
+        joined = " ".join(row)
+        match = SNAPSHOT_RE.search(joined)
+        if match:
+            return parse_date(match.group(1))
+    lower = fallback_name.lower()
+    for name, month in MONTHS.items():
+        if name in lower:
+            year_match = re.search(r"(20\d{2})", lower)
+            year = int(year_match.group(1)) if year_match else 2025
+            next_month = month + 1
+            next_year = year
+            if next_month == 13:
+                next_month = 1
+                next_year += 1
+            return f"{next_year:04d}-{next_month:02d}-01"
+    return ""
+
+
+def agreement_snapshot(row: dict[str, str], filename: str) -> str:
+    period = row.get("period_of_date", "")
+    if " - " in period:
+        return parse_date(period.split(" - ")[-1])
+    digits = re.search(r"(\d{2})(\d{2})(20\d{2})", filename)
+    if digits:
+        day, month, year = digits.groups()
+        return f"{year}-{month}-{day}"
+    return ""
+
+
+def buau_snapshot(filename: str) -> str:
+    lower = filename.lower()
+    year_match = re.search(r"(20\d{2})", lower)
+    year = int(year_match.group(1)) if year_match else 2025
+    for name, month in MONTHS.items():
+        if name in lower:
+            return f"{year:04d}-{month:02d}-01"
+    return ""
+
+
+@dataclass
+class DataStore:
+    records: list[dict]
+    meta: dict
+
+
+def load_data() -> DataStore:
+    records: list[dict] = []
+    load_rcb(records)
+    load_agreements(records)
+    load_state_task(records)
+    load_buau(records)
+
+    budgets = sorted({r["budget"] for r in records if r.get("budget")})
+    sources = sorted({r["source"] for r in records})
+    snapshots = sorted({r["snapshot"] for r in records if r.get("snapshot")})
+    objects = sorted(
+        {r["object_name"] for r in records if r.get("object_name")},
+        key=lambda x: x.lower(),
+    )
+    meta = {
+        "records": len(records),
+        "budgets": budgets,
+        "sources": sources,
+        "snapshots": snapshots,
+        "objects": objects[:500],
+    }
+    return DataStore(records=records, meta=meta)
+
+
+def load_rcb(records: list[dict]) -> None:
+    folder = DATA_DIR / "1_RCB"
+    for path in sorted(folder.glob("*.csv")):
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            rows = list(csv.reader(handle, delimiter=";"))
+        header_index = next(
+            (i for i, row in enumerate(rows) if row and row[0].strip() == "Бюджет"),
+            None,
+        )
+        if header_index is None:
+            continue
+        snapshot = rcb_snapshot_from_rows(rows, path.name)
+        header = rows[header_index]
+        for row in rows[header_index + 1 :]:
+            if not any(cell.strip() for cell in row):
+                continue
+            item = dict(zip(header, row))
+            kcsr = display_code(item.get("КЦСР"))
+            object_name = item.get("Наименование КЦСР", "").strip() or kcsr
+            budget = item.get("Бюджет", "").strip()
+            records.append(
+                {
+                    "source": "РЧБ",
+                    "snapshot": snapshot,
+                    "event_date": parse_date(item.get("Дата проводки")),
+                    "budget": budget,
+                    "object_code": kcsr,
+                    "object_code_norm": normalize_code(kcsr),
+                    "object_name": object_name,
+                    "kfsr": display_code(item.get("КФСР")),
+                    "kvr": display_code(item.get("КВР")),
+                    "kosgu": display_code(item.get("КОСГУ")),
+                    "counterparty": item.get("Наименование КВСР", "").strip(),
+                    "document_number": "",
+                    "description": item.get("Наименование КВР", "").strip(),
+                    "limit": parse_amount(item.get("Лимиты ПБС 2025 год")),
+                    "obligation": parse_amount(item.get("Подтв. лимитов по БО 2025 год")),
+                    "cash": parse_amount(item.get("Всего выбытий (бух.уч.)")),
+                    "agreement": 0.0,
+                    "contract": 0.0,
+                    "payment": 0.0,
+                    "buau": 0.0,
+                }
+            )
+
+
+def load_agreements(records: list[dict]) -> None:
+    folder = DATA_DIR / "2_Agreements"
+    class_names = {
+        "273": "МБТ",
+        "278": "Иные цели БУ/АУ",
+        "272": "Госзадание",
+        "313": "ЮЛ/ИП/ФЛ",
+    }
+    for path in sorted(folder.glob("*.csv")):
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            for row in csv.DictReader(handle):
+                kcsr = display_code(row.get("kcsr_code"))
+                recipient = (row.get("dd_recipient_caption") or row.get("dd_estimate_caption") or "").strip()
+                records.append(
+                    {
+                        "source": "Соглашения",
+                        "snapshot": agreement_snapshot(row, path.name),
+                        "event_date": parse_date(row.get("close_date")),
+                        "budget": (row.get("caption") or "").replace("!!! НЕ РАБОТАТЬ !!!", "").strip(),
+                        "object_code": kcsr,
+                        "object_code_norm": normalize_code(kcsr),
+                        "object_name": recipient or kcsr,
+                        "kfsr": display_code(row.get("kfsr_code")),
+                        "kvr": display_code(row.get("kvr_code")),
+                        "kosgu": display_code(row.get("kesr_code")),
+                        "counterparty": recipient,
+                        "document_number": (row.get("reg_number") or "").strip(),
+                        "description": class_names.get(str(row.get("documentclass_id")), "Соглашение"),
+                        "limit": 0.0,
+                        "obligation": 0.0,
+                        "cash": 0.0,
+                        "agreement": parse_amount(row.get("amount_1year")),
+                        "contract": 0.0,
+                        "payment": 0.0,
+                        "buau": 0.0,
+                    }
+                )
+
+
+def load_state_task(records: list[dict]) -> None:
+    folder = DATA_DIR / "3_StateTask"
+    budget_lines: dict[str, list[dict[str, str]]] = defaultdict(list)
+    lines_path = folder / "Бюджетные строки.csv"
+    contracts_path = folder / "Контракты и договора.csv"
+    payments_path = folder / "Платежки.csv"
+
+    if lines_path.exists():
+        with lines_path.open("r", encoding="utf-8-sig", newline="") as handle:
+            for row in csv.DictReader(handle):
+                budget_lines[row["con_document_id"]].append(row)
+
+    contracts: dict[str, dict[str, str]] = {}
+    if contracts_path.exists():
+        with contracts_path.open("r", encoding="utf-8-sig", newline="") as handle:
+            for row in csv.DictReader(handle):
+                contracts[row["con_document_id"]] = row
+                for line in budget_lines.get(row["con_document_id"], [{}]):
+                    kcsr = display_code(line.get("kcsr_code"))
+                    records.append(
+                        {
+                            "source": "ГЗ: контракты",
+                            "snapshot": parse_date(row.get("con_date")),
+                            "event_date": parse_date(row.get("con_date")),
+                            "budget": "",
+                            "object_code": kcsr,
+                            "object_code_norm": normalize_code(kcsr),
+                            "object_name": kcsr or row.get("con_number", "").strip(),
+                            "kfsr": display_code(line.get("kfsr_code")),
+                            "kvr": display_code(line.get("kvr_code")),
+                            "kosgu": display_code(line.get("kesr_code")),
+                            "counterparty": (row.get("zakazchik_key") or "").strip(),
+                            "document_number": (row.get("con_number") or "").strip(),
+                            "description": "Контракт/договор",
+                            "limit": 0.0,
+                            "obligation": 0.0,
+                            "cash": 0.0,
+                            "agreement": 0.0,
+                            "contract": parse_amount(row.get("con_amount")),
+                            "payment": 0.0,
+                            "buau": 0.0,
+                        }
+                    )
+
+    if payments_path.exists():
+        with payments_path.open("r", encoding="utf-8-sig", newline="") as handle:
+            for row in csv.DictReader(handle):
+                contract = contracts.get(row["con_document_id"], {})
+                related_lines = budget_lines.get(row["con_document_id"], [{}])
+                for line in related_lines:
+                    kcsr = display_code(line.get("kcsr_code"))
+                    records.append(
+                        {
+                            "source": "ГЗ: платежи",
+                            "snapshot": parse_date(row.get("platezhka_paydate")),
+                            "event_date": parse_date(row.get("platezhka_paydate")),
+                            "budget": "",
+                            "object_code": kcsr,
+                            "object_code_norm": normalize_code(kcsr),
+                            "object_name": kcsr or contract.get("con_number", "").strip(),
+                            "kfsr": display_code(line.get("kfsr_code")),
+                            "kvr": display_code(line.get("kvr_code")),
+                            "kosgu": display_code(line.get("kesr_code")),
+                            "counterparty": (contract.get("zakazchik_key") or "").strip(),
+                            "document_number": (row.get("platezhka_num") or "").strip(),
+                            "description": "Оплата по контракту",
+                            "limit": 0.0,
+                            "obligation": 0.0,
+                            "cash": 0.0,
+                            "agreement": 0.0,
+                            "contract": 0.0,
+                            "payment": parse_amount(row.get("platezhka_amount")),
+                            "buau": 0.0,
+                        }
+                    )
+
+
+def load_buau(records: list[dict]) -> None:
+    folder = DATA_DIR / "4_BUAU_Export"
+    for path in sorted(folder.glob("*.csv")):
+        snapshot = buau_snapshot(path.name)
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            for row in csv.DictReader(handle, delimiter=";"):
+                kcsr = display_code(row.get("КЦСР"))
+                organization = (row.get("Организация") or "").strip()
+                records.append(
+                    {
+                        "source": "БУАУ",
+                        "snapshot": snapshot,
+                        "event_date": parse_date(row.get("Дата проводки")),
+                        "budget": (row.get("Бюджет") or "").strip(),
+                        "object_code": kcsr,
+                        "object_code_norm": normalize_code(kcsr),
+                        "object_name": organization or kcsr,
+                        "kfsr": display_code(row.get("КФСР")),
+                        "kvr": display_code(row.get("КВР")),
+                        "kosgu": display_code(row.get("КОСГУ")),
+                        "counterparty": organization,
+                        "document_number": "",
+                        "description": (row.get("Орган, предоставляющий субсидии") or "").strip(),
+                        "limit": 0.0,
+                        "obligation": 0.0,
+                        "cash": 0.0,
+                        "agreement": 0.0,
+                        "contract": 0.0,
+                        "payment": 0.0,
+                        "buau": parse_amount(row.get("Выплаты с учетом возврата")),
+                    }
+                )
+
+
+def apply_filters(records: list[dict], params: dict[str, list[str]]) -> list[dict]:
+    text = params.get("q", [""])[0].strip().lower()
+    code = normalize_code(params.get("code", [""])[0])
+    budget = params.get("budget", [""])[0].strip().lower()
+    source = params.get("source", [""])[0].strip()
+    start = params.get("start", [""])[0].strip()
+    end = params.get("end", [""])[0].strip()
+
+    result = []
+    for record in records:
+        haystack = " ".join(
+            str(record.get(key, ""))
+            for key in ("object_name", "object_code", "budget", "counterparty", "document_number", "description")
+        ).lower()
+        if text and text not in haystack:
+            continue
+        if code and code not in record.get("object_code_norm", ""):
+            continue
+        if budget and budget not in record.get("budget", "").lower():
+            continue
+        if source and record.get("source") != source:
+            continue
+        date_value = record.get("snapshot") or record.get("event_date") or ""
+        if start and date_value and date_value < start:
+            continue
+        if end and date_value and date_value > end:
+            continue
+        result.append(record)
+    return result
+
+
+def aggregate(records: list[dict]) -> dict:
+    groups: dict[tuple[str, str], dict] = {}
+    timeline: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    metric_keys = ["limit", "obligation", "cash", "agreement", "contract", "payment", "buau"]
+
+    totals = {key: 0.0 for key in metric_keys}
+    for record in records:
+        object_key = record.get("object_code_norm") or record.get("object_name", "").lower()
+        key = (object_key, record.get("budget") or "")
+        row = groups.setdefault(
+            key,
+            {
+                "object_code": record.get("object_code") or "",
+                "object_name": record.get("object_name") or "",
+                "budget": key[1],
+                "sources": set(),
+                **{metric: 0.0 for metric in metric_keys},
+            },
+        )
+        if not row["object_code"] and record.get("object_code"):
+            row["object_code"] = record["object_code"]
+        if (
+            record.get("source") == "РЧБ"
+            and record.get("object_name")
+            and len(record["object_name"]) > len(row["object_name"])
+        ):
+            row["object_name"] = record["object_name"]
+        row["sources"].add(record["source"])
+        point = record.get("snapshot") or record.get("event_date") or "unknown"
+        for metric in metric_keys:
+            value = float(record.get(metric) or 0.0)
+            row[metric] += value
+            totals[metric] += value
+            if point != "unknown":
+                timeline[point][metric] += value
+
+    rows = []
+    for row in groups.values():
+        row["sources"] = ", ".join(sorted(row["sources"]))
+        row["total"] = sum(row[metric] for metric in metric_keys)
+        rows.append(row)
+    rows.sort(key=lambda item: item["total"], reverse=True)
+
+    timeline_rows = []
+    for date in sorted(timeline):
+        point = {"date": date}
+        point.update({metric: timeline[date].get(metric, 0.0) for metric in metric_keys})
+        timeline_rows.append(point)
+
+    return {
+        "totals": totals,
+        "rows": rows[:300],
+        "details": records[:500],
+        "timeline": timeline_rows,
+        "count": len(records),
+    }
+
+
+STORE = load_data()
+
+
+class Handler(SimpleHTTPRequestHandler):
+    def translate_path(self, path: str) -> str:
+        parsed = urlparse(path)
+        requested = parsed.path
+        if requested == "/":
+            return str(STATIC_DIR / "index.html")
+        if requested.startswith("/static/"):
+            return str(ROOT / requested.lstrip("/"))
+        return str(STATIC_DIR / requested.lstrip("/"))
+
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/meta":
+            self.write_json(STORE.meta)
+            return
+        if parsed.path == "/api/query":
+            params = parse_qs(parsed.query)
+            filtered = apply_filters(STORE.records, params)
+            self.write_json(aggregate(filtered))
+            return
+        super().do_GET()
+
+    def write_json(self, payload: object) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def main() -> None:
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    print(f"Loaded {STORE.meta['records']} records from {DATA_DIR}")
+    print(f"Open http://127.0.0.1:{port}")
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

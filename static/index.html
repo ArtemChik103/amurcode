@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Конструктор аналитических выборок</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>Конструктор аналитических выборок</h1>
+        <p>РЧБ, соглашения, госзаказ и БУ/АУ в одной витрине</p>
+      </div>
+      <button id="exportCsv" class="icon-button" title="Экспортировать таблицу в CSV" aria-label="Экспорт CSV">
+        <span aria-hidden="true">⇩</span>
+        CSV
+      </button>
+    </header>
+
+    <main>
+      <section class="filters" aria-label="Фильтры">
+        <label>
+          <span>Поиск</span>
+          <input id="q" type="search" placeholder="объект, бюджет, получатель, номер" />
+        </label>
+        <label>
+          <span>Код</span>
+          <input id="code" type="search" placeholder="970, 6105, КЦСР" />
+        </label>
+        <label>
+          <span>Бюджет</span>
+          <select id="budget"></select>
+        </label>
+        <label>
+          <span>Источник</span>
+          <select id="source"></select>
+        </label>
+        <label>
+          <span>С</span>
+          <input id="start" type="date" />
+        </label>
+        <label>
+          <span>По</span>
+          <input id="end" type="date" />
+        </label>
+        <button id="reset" class="secondary" title="Сбросить фильтры" aria-label="Сбросить">↺</button>
+      </section>
+
+      <section class="kpis" aria-label="Показатели">
+        <article>
+          <span>Лимиты</span>
+          <strong id="limit">0</strong>
+        </article>
+        <article>
+          <span>Бюджетные обязательства</span>
+          <strong id="obligation">0</strong>
+        </article>
+        <article>
+          <span>Касса</span>
+          <strong id="cash">0</strong>
+        </article>
+        <article>
+          <span>Соглашения</span>
+          <strong id="agreement">0</strong>
+        </article>
+        <article>
+          <span>Контракты и платежи</span>
+          <strong id="procurement">0</strong>
+        </article>
+        <article>
+          <span>БУ/АУ выплаты</span>
+          <strong id="buau">0</strong>
+        </article>
+      </section>
+
+      <section class="workspace">
+        <div class="panel chart-panel">
+          <div class="panel-head">
+            <h2>Динамика</h2>
+            <span id="recordCount"></span>
+          </div>
+          <canvas id="chart" height="260"></canvas>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Сводная таблица</h2>
+            <span id="rowCount"></span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Код</th>
+                  <th>Объект</th>
+                  <th>Бюджет</th>
+                  <th>Источники</th>
+                  <th>Лимиты</th>
+                  <th>БО</th>
+                  <th>Касса</th>
+                  <th>Соглашения</th>
+                  <th>Контракты</th>
+                  <th>Платежи</th>
+                  <th>БУ/АУ</th>
+                </tr>
+              </thead>
+              <tbody id="summaryBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Детализация</h2>
+            <span id="detailCount"></span>
+          </div>
+          <div class="table-wrap compact">
+            <table>
+              <thead>
+                <tr>
+                  <th>Дата</th>
+                  <th>Источник</th>
+                  <th>Код</th>
+                  <th>Объект</th>
+                  <th>Документ</th>
+                  <th>Контрагент</th>
+                  <th>Сумма</th>
+                </tr>
+              </thead>
+              <tbody id="detailBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
