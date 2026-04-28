@@ -788,6 +788,7 @@ def assistant_rule_based(message: str, context: dict | None = None) -> dict:
     if intent.startswith("explain") and rag_context:
         explanation = " " + " ".join(rag_context.split())[:700]
 
+    alternative_label = "Искать во всех данных" if search_text else "Показать все данные"
     return {
         "mode": "rule_based",
         "intent": intent,
@@ -796,11 +797,11 @@ def assistant_rule_based(message: str, context: dict | None = None) -> dict:
         "action": action,
         "alternatives": [
             {
-                "label": "Искать во всех данных",
+                "label": alternative_label,
                 "action": {
                     "mode": "slice",
                     "template": "all",
-                    "q": search_text or message,
+                    "q": search_text,
                     "code": "",
                     "budget": "",
                     "source": "",

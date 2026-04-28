@@ -141,6 +141,8 @@ class DataLoadTests(unittest.TestCase):
     def test_assistant_rule_based_core_intents(self):
         skk = app.assistant_rule_based("Покажи СКК", {})
         self.assertEqual(skk["action"]["template"], "skk")
+        self.assertEqual(skk["alternatives"][0]["label"], "Показать все данные")
+        self.assertEqual(skk["alternatives"][0]["action"]["q"], "")
 
         city = app.assistant_rule_based("6105 Благовещенск", {})
         self.assertEqual(city["action"]["template"], "skk")
