@@ -435,6 +435,7 @@ label span,
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 10px;
   margin: 18px 30px 0;
+  scroll-margin-top: 92px;
 }
 
 .quick-start,
@@ -1022,6 +1023,10 @@ summary {
 @media (max-width: 700px) {
   .topbar {
     padding: 16px;
+  }
+
+  .view-tabs {
+    scroll-margin-top: 78px;
   }
 
   .kpi-grid,

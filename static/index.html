@@ -189,7 +189,7 @@
           </div>
         </section>
 
-        <nav class="view-tabs" aria-label="Разделы">
+        <nav ref="resultTabs" class="view-tabs" aria-label="Разделы">
           <button v-for="tab in viewTabs" :key="tab.code" type="button" :class="{ active: currentView === tab.code }" @click="setView(tab.code)">
             <span>{{ tab.label }}</span>
             <small>{{ tab.count }}</small>

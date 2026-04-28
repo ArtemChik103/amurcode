@@ -7,6 +7,7 @@ let capturedOptions = null;
 let emittedDownloads = [];
 let emittedDialogs = 0;
 let lastFetch = null;
+let scrollCalls = 0;
 
 const context = {
   console,
@@ -129,6 +130,13 @@ assert.ok(capturedOptions, "Vue options were not captured");
 function makeInstance() {
   const instance = capturedOptions.data();
   instance.$refs = {
+    resultTabs: {
+      scrollIntoView(options) {
+        scrollCalls += 1;
+        assert.equal(options.behavior, "smooth");
+        assert.equal(options.block, "start");
+      },
+    },
     traceDialog: {
       showModal() {
         emittedDialogs += 1;
@@ -187,6 +195,7 @@ function makeInstance() {
   instance.loadCalls = 0;
   instance.loadData = async function loadDataMock() {
     this.loadCalls += 1;
+    await this.scrollToResultsIfNeeded();
   };
   instance.drawChart = function drawChartMock() {};
   return instance;
@@ -203,7 +212,8 @@ function makeInstance() {
   vmApp.filters.code = "6105";
   vmApp.filters.budget = "Областной бюджет";
   vmApp.filters.source = "РЧБ";
-  vmApp.applyQuickAction(quick);
+  scrollCalls = 0;
+  await vmApp.applyQuickAction(quick);
   assert.equal(vmApp.mode, "slice");
   assert.equal(vmApp.filters.template, "skk");
   assert.equal(vmApp.filters.post_filter, "low_execution");
@@ -214,12 +224,16 @@ function makeInstance() {
   assert.deepEqual(vmApp.selectedMetrics, ["limit", "cash"]);
   assert.equal(vmApp.currentView, "overview");
   assert.equal(vmApp.loadCalls, 1);
+  assert.equal(scrollCalls, 1);
+  assert.equal(vmApp.pendingResultScroll, false);
 
-  vmApp.applyQuickAction({ mode: "compare", template: "skk", metrics: ["limit"] });
+  scrollCalls = 0;
+  await vmApp.applyQuickAction({ mode: "compare", template: "skk", metrics: ["limit"] });
   assert.equal(vmApp.mode, "compare");
   assert.equal(vmApp.currentView, "changes");
   assert.equal(vmApp.filters.base, "2025-02-01");
   assert.equal(vmApp.filters.target, "2026-04-01");
+  assert.equal(scrollCalls, 1);
 
   const params = vmApp.buildQueryParams(true);
   assert.equal(params.get("template"), "skk");
@@ -237,8 +251,10 @@ function makeInstance() {
   vmApp.smartInput = "6105";
   vmApp.onSmartInput();
   assert.ok(vmApp.smartSuggestions.length > 0);
-  vmApp.applyFirstSuggestion();
+  scrollCalls = 0;
+  await vmApp.applyFirstSuggestion();
   assert.equal(vmApp.filters.template, "skk");
+  assert.equal(scrollCalls, 1);
 
   assert.equal(vmApp.rowStatus({ limit: 100, obligation: 0, cash: 0, payment: 0, buau: 0, agreement: 0, contract: 0 }), "no_execution");
   assert.equal(vmApp.rowStatus({ limit: 100, obligation: 0, cash: 10, payment: 0, buau: 0, agreement: 0, contract: 0 }), "low_execution");
@@ -259,15 +275,17 @@ function makeInstance() {
   assert.equal(vmApp.resultNarrative.severity, "empty");
   const allDataSuggestion = vmApp.emptyStateSuggestions.find((item) => item.label === "Искать во всех данных");
   assert.ok(allDataSuggestion);
-  vmApp.applyEmptySuggestion(allDataSuggestion);
+  scrollCalls = 0;
+  await vmApp.applyEmptySuggestion(allDataSuggestion);
   assert.equal(vmApp.filters.template, "all");
   assert.equal(vmApp.filters.code, "");
   assert.equal(vmApp.filters.budget, "");
   assert.equal(vmApp.filters.source, "");
   assert.equal(vmApp.filters.post_filter, "");
+  assert.equal(scrollCalls, 1);
 
   vmApp.filters.budget = "Областной бюджет";
-  vmApp.applyEmptySuggestion({ label: "Убрать бюджет", patch: { budget: "" } });
+  await vmApp.applyEmptySuggestion({ label: "Убрать бюджет", patch: { budget: "" } });
   assert.equal(vmApp.filters.budget, "");
 
   vmApp.mode = "compare";
@@ -282,15 +300,26 @@ function makeInstance() {
   vmApp.filters.budget = "Областной бюджет";
   vmApp.filters.source = "РЧБ";
   vmApp.filters.post_filter = "low_execution";
-  vmApp.applyAssistantAction(vmApp.assistant.response.alternatives[0].action);
+  scrollCalls = 0;
+  await vmApp.applyAssistantAction(vmApp.assistant.response.alternatives[0].action);
   assert.equal(vmApp.filters.template, "all");
   assert.equal(vmApp.filters.code, "");
   assert.equal(vmApp.filters.budget, "");
   assert.equal(vmApp.filters.source, "");
   assert.equal(vmApp.filters.post_filter, "");
-  vmApp.applyAssistantAction(vmApp.assistant.response.action);
+  assert.equal(scrollCalls, 1);
+  scrollCalls = 0;
+  await vmApp.applyAssistantAction(vmApp.assistant.response.action);
   assert.equal(vmApp.filters.template, "skk");
   assert.equal(vmApp.filters.q, "Благовещенск");
+  assert.equal(scrollCalls, 1);
+
+  vmApp.requestResultScroll();
+  assert.equal(vmApp.pendingResultScroll, true);
+  scrollCalls = 0;
+  await vmApp.scrollToResultsIfNeeded();
+  assert.equal(vmApp.pendingResultScroll, false);
+  assert.equal(scrollCalls, 1);
 
   await vmApp.openTrace("r1");
   assert.equal(emittedDialogs, 1);

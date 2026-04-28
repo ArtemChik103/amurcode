@@ -54,6 +54,25 @@ class PlaywrightUiTests(unittest.TestCase):
     def click_button(self, name):
         self.page.get_by_role("button", name=name).first.click()
 
+    def assert_in_viewport(self, locator):
+        locator.wait_for(timeout=10000)
+        handle = locator.element_handle()
+        self.assertIsNotNone(handle)
+        self.page.wait_for_function(
+            """(element) => {
+                const box = element.getBoundingClientRect();
+                return box.y >= 0 && box.y < window.innerHeight;
+            }""",
+            arg=handle,
+            timeout=10000,
+        )
+        box = locator.bounding_box()
+        viewport = self.page.viewport_size
+        self.assertIsNotNone(box)
+        self.assertIsNotNone(viewport)
+        self.assertGreaterEqual(box["y"], 0)
+        self.assertLess(box["y"], viewport["height"])
+
     def test_quick_actions_cover_all_scenarios(self):
         expectations = [
             ("Показать СКК", "СКК"),
@@ -99,6 +118,42 @@ class PlaywrightUiTests(unittest.TestCase):
         self.click_button("Показать результат")
         self.page.locator(".eyebrow", has_text="СКК").wait_for(timeout=10000)
         self.page.get_by_text("Короткий вывод").wait_for(timeout=10000)
+
+    def test_assistant_result_scrolls_to_tabs(self):
+        self.page.get_by_placeholder("Например: покажи СКК по Благовещенску").nth(1).fill("СКК Благовещенск")
+        self.click_button("Понять запрос")
+        self.page.get_by_text("Я понял запрос").wait_for(timeout=10000)
+        self.click_button("Показать результат")
+        self.assert_in_viewport(self.page.locator(".view-tabs"))
+
+    def test_quick_start_scrolls_to_tabs_after_previous_search(self):
+        self.page.get_by_placeholder("Например: покажи СКК по Благовещенску").nth(1).fill("СКК Благовещенск")
+        self.click_button("Понять запрос")
+        self.page.get_by_text("Я понял запрос").wait_for(timeout=10000)
+        self.click_button("Показать результат")
+        self.assert_in_viewport(self.page.locator(".view-tabs"))
+
+        self.page.evaluate("window.scrollTo(0, 0)")
+        self.click_button("Показать СКК")
+        self.assert_in_viewport(self.page.locator(".view-tabs"))
+
+    def test_empty_state_action_scrolls_to_tabs(self):
+        self.click_button("Расширенные настройки")
+        self.page.get_by_placeholder("объект, бюджет, получатель").fill("zzzz-no-data")
+        self.page.wait_for_timeout(500)
+        self.page.get_by_text("Ничего не найдено").first.wait_for(timeout=10000)
+
+        self.page.evaluate("window.scrollTo(0, 0)")
+        self.click_button("Очистить поиск")
+        self.assert_in_viewport(self.page.locator(".view-tabs"))
+
+    def test_manual_advanced_filter_does_not_force_scroll(self):
+        self.page.evaluate("window.scrollTo(0, 0)")
+        self.click_button("Расширенные настройки")
+        self.page.locator("select").first.select_option("skk")
+        self.page.wait_for_timeout(700)
+        y = self.page.evaluate("window.scrollY")
+        self.assertLess(y, 250)
 
     def test_quick_start_resets_previous_assistant_search_scope(self):
         self.page.get_by_placeholder("Например: покажи СКК по Благовещенску").nth(1).fill("СКК Благовещенск")

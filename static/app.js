@@ -123,6 +123,8 @@ createApp({
       debounceTimer: null,
       chartRedraw: null,
       initialized: false,
+      pendingResultScroll: false,
+      suppressAutoLoad: false,
     };
   },
 
@@ -277,30 +279,30 @@ createApp({
 
   watch: {
     "filters.template"() {
-      if (this.initialized) this.loadData();
+      if (this.initialized && !this.suppressAutoLoad) this.loadData();
     },
     "filters.budget"() {
-      if (this.initialized) this.loadData();
+      if (this.initialized && !this.suppressAutoLoad) this.loadData();
     },
     "filters.source"() {
-      if (this.initialized) this.loadData();
+      if (this.initialized && !this.suppressAutoLoad) this.loadData();
     },
     "filters.start"() {
-      if (this.initialized && this.mode === "slice") this.loadData();
+      if (this.initialized && !this.suppressAutoLoad && this.mode === "slice") this.loadData();
     },
     "filters.end"() {
-      if (this.initialized && this.mode === "slice") this.loadData();
+      if (this.initialized && !this.suppressAutoLoad && this.mode === "slice") this.loadData();
     },
     "filters.base"() {
-      if (this.initialized && this.mode === "compare") this.loadData();
+      if (this.initialized && !this.suppressAutoLoad && this.mode === "compare") this.loadData();
     },
     "filters.target"() {
-      if (this.initialized && this.mode === "compare") this.loadData();
+      if (this.initialized && !this.suppressAutoLoad && this.mode === "compare") this.loadData();
     },
     selectedMetrics: {
       deep: true,
       handler() {
-        if (this.initialized) this.loadData();
+        if (this.initialized && !this.suppressAutoLoad) this.loadData();
       },
     },
     currentView() {
@@ -368,6 +370,7 @@ createApp({
         this.query = await fetchJson(`/api/query?${params.toString()}`);
         await nextTick();
         this.drawChart();
+        await this.scrollToResultsIfNeeded();
       } catch (error) {
         console.error(error);
         this.error = "Не удалось загрузить данные. Проверьте параметры запроса.";
@@ -384,6 +387,8 @@ createApp({
         if (this.filters.base) params.set("base", this.filters.base);
         if (this.filters.target) params.set("target", this.filters.target);
         this.compare = await fetchJson(`/api/compare?${params.toString()}`);
+        await nextTick();
+        await this.scrollToResultsIfNeeded();
       } catch (error) {
         console.error(error);
         this.error = "Не удалось загрузить сравнение. Проверьте параметры запроса.";
@@ -406,9 +411,35 @@ createApp({
       return params;
     },
 
+    requestResultScroll() {
+      this.pendingResultScroll = true;
+    },
+
+    async scrollToResultsIfNeeded() {
+      if (!this.pendingResultScroll) return;
+      this.pendingResultScroll = false;
+      await nextTick();
+      this.$refs.resultTabs?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    },
+
+    async runWithSuppressedAutoLoad(callback, shouldScroll = false) {
+      this.suppressAutoLoad = true;
+      try {
+        callback();
+        await nextTick();
+      } finally {
+        this.suppressAutoLoad = false;
+      }
+      if (shouldScroll) this.requestResultScroll();
+      await this.loadData();
+    },
+
     applyQuickAction(action) {
       const { code, ...cleanAction } = action;
-      this.applyAction({
+      return this.applyAction({
         reset_scope: true,
         q: "",
         code: "",
@@ -416,7 +447,7 @@ createApp({
         source: "",
         post_filter: "",
         ...cleanAction,
-      });
+      }, { scrollToResults: true });
     },
 
     onSmartInput() {
@@ -468,12 +499,13 @@ createApp({
 
     applyFirstSuggestion() {
       if (!this.smartSuggestions.length) this.onSmartInput();
-      if (this.smartSuggestions[0]) this.applySmartSuggestion(this.smartSuggestions[0]);
+      if (this.smartSuggestions[0]) return this.applySmartSuggestion(this.smartSuggestions[0]);
+      return Promise.resolve();
     },
 
     applySmartSuggestion(suggestion) {
       this.selectedSuggestion = suggestion;
-      this.applyAction(suggestion.action || {});
+      return this.applyAction(suggestion.action || {}, { scrollToResults: true });
     },
 
     async askAssistant() {
@@ -506,39 +538,42 @@ createApp({
     },
 
     applyAssistantAction(action) {
-      this.applyAction(action || {});
+      return this.applyAction(action || {}, { scrollToResults: true });
     },
 
-    applyAction(action) {
-      if (action.reset_scope) {
-        this.filters.code = "";
-        this.filters.budget = "";
-        this.filters.source = "";
-        this.filters.post_filter = "";
-      }
-      if (action.mode) this.mode = action.mode;
-      if (action.template) this.filters.template = action.template;
-      if (action.q !== undefined) this.filters.q = action.q;
-      if (action.code !== undefined) this.filters.code = action.code;
-      if (action.budget !== undefined) this.filters.budget = action.budget;
-      if (action.source !== undefined) this.filters.source = action.source;
-      this.filters.post_filter = action.post_filter || "";
-      if (action.metrics?.length) this.selectedMetrics = action.metrics;
-      if (this.mode === "compare") {
-        this.filters.base = action.base || this.meta.snapshots[0] || "";
-        this.filters.target = action.target || this.meta.snapshots[this.meta.snapshots.length - 1] || "";
-        this.currentView = "changes";
-      } else {
-        this.filters.start = action.start || this.meta.snapshots[0] || "";
-        this.filters.end = action.end || this.meta.snapshots[this.meta.snapshots.length - 1] || "";
-        this.currentView = "overview";
-      }
-      this.loadData();
+    async applyAction(action, options = {}) {
+      const shouldScroll = options.scrollToResults !== false;
+      await this.runWithSuppressedAutoLoad(() => {
+        if (action.reset_scope) {
+          this.filters.code = "";
+          this.filters.budget = "";
+          this.filters.source = "";
+          this.filters.post_filter = "";
+        }
+        if (action.mode) this.mode = action.mode;
+        if (action.template) this.filters.template = action.template;
+        if (action.q !== undefined) this.filters.q = action.q;
+        if (action.code !== undefined) this.filters.code = action.code;
+        if (action.budget !== undefined) this.filters.budget = action.budget;
+        if (action.source !== undefined) this.filters.source = action.source;
+        this.filters.post_filter = action.post_filter || "";
+        if (action.metrics?.length) this.selectedMetrics = action.metrics;
+        if (this.mode === "compare") {
+          this.filters.base = action.base || this.meta.snapshots[0] || "";
+          this.filters.target = action.target || this.meta.snapshots[this.meta.snapshots.length - 1] || "";
+          this.currentView = "changes";
+        } else {
+          this.filters.start = action.start || this.meta.snapshots[0] || "";
+          this.filters.end = action.end || this.meta.snapshots[this.meta.snapshots.length - 1] || "";
+          this.currentView = "overview";
+        }
+      }, shouldScroll);
     },
 
-    applyEmptySuggestion(item) {
-      Object.assign(this.filters, item.patch || {});
-      this.loadData();
+    async applyEmptySuggestion(item) {
+      await this.runWithSuppressedAutoLoad(() => {
+        Object.assign(this.filters, item.patch || {});
+      }, true);
     },
 
     scheduleLoad() {
