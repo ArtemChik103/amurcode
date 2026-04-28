@@ -32,7 +32,7 @@ METRICS = {
 }
 TEMPLATES = {
     "all": {"label": "Все данные", "description": "Без предметного шаблона"},
-    "kik": {"label": "КИК", "description": "КЦСР содержит 978 с 6-й позиции"},
+    "kik": {"label": "КИК", "description": "КЦСР содержит 975 или 978 с 6-й позиции"},
     "skk": {"label": "СКК", "description": "КЦСР содержит 6105 с 6-й позиции"},
     "two_thirds": {"label": "2/3", "description": "КЦСР содержит 970 с 6-й позиции"},
     "okv": {"label": "ОКВ", "description": "Капитальные вложения по КВР"},
@@ -236,7 +236,7 @@ def matches_template(record: dict, template: str) -> bool:
         return True
     code = record.get("object_code_norm", "")
     if template == "kik":
-        return code[5:8] == "978"
+        return code[5:8] in {"975", "978"}
     if template == "skk":
         return code[5:9] == "6105"
     if template == "two_thirds":

@@ -104,9 +104,21 @@ class DataLoadTests(unittest.TestCase):
 
     def test_templates_match_expected_code_fragments(self):
         self.assertTrue(app.matches_template({"object_code_norm": "000006105Б"}, "skk"))
+        self.assertTrue(app.matches_template({"object_code_norm": "00000975"}, "kik"))
         self.assertTrue(app.matches_template({"object_code_norm": "00000978"}, "kik"))
         self.assertTrue(app.matches_template({"object_code_norm": "00000970"}, "two_thirds"))
         self.assertTrue(app.matches_template({"object_code_norm": "", "kvr": "414"}, "okv"))
+
+    def test_kik_template_matches_current_case_data(self):
+        rows = app.apply_filters(
+            self.store.records,
+            {"template": ["kik"], "start": ["2025-02-01"], "end": ["2026-04-02"]},
+        )
+        result = app.aggregate(rows)
+        self.assertGreater(len(rows), 0)
+        self.assertGreater(len(result["rows"]), 0)
+        self.assertGreater(result["totals"]["limit"], 0)
+        self.assertTrue(all(record["object_code_norm"][5:8] in {"975", "978"} for record in rows if record["object_code_norm"]))
 
     def test_quick_actions_include_core_scenarios(self):
         self.assertGreaterEqual(len(app.quick_actions_payload()), 6)
