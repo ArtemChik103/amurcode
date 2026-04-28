@@ -114,6 +114,18 @@ class DataLoadTests(unittest.TestCase):
             self.assertIn(code, app.QUICK_ACTIONS)
             self.assertIn("metrics", app.QUICK_ACTIONS[code])
 
+    def test_low_execution_post_filter_keeps_problem_rows_only(self):
+        metrics = ["limit", "cash", "payment", "buau"]
+        result = app.aggregate(self.store.records, metrics)
+        filtered = app.apply_aggregate_post_filter(result, "low_execution", metrics)
+        self.assertGreater(len(filtered["rows"]), 0)
+        self.assertLessEqual(len(filtered["rows"]), len(result["rows"]))
+        for row in filtered["rows"]:
+            plan = float(row.get("limit") or 0) + float(row.get("obligation") or 0)
+            execution = float(row.get("cash") or 0) + float(row.get("payment") or 0) + float(row.get("buau") or 0)
+            self.assertGreater(plan, 0)
+            self.assertTrue(execution == 0 or execution / plan < 0.25)
+
     def test_assistant_rule_based_core_intents(self):
         skk = app.assistant_rule_based("Покажи СКК", {})
         self.assertEqual(skk["action"]["template"], "skk")
@@ -224,6 +236,28 @@ class HttpTests(unittest.TestCase):
         payload = json.loads(body.decode("utf-8"))
         self.assertIn(payload["mode"], {"rule_based", "llm"})
         self.assertEqual(payload["action"]["template"], "skk")
+
+    def test_quick_actions_run_against_public_api(self):
+        status, _, body = self.request("/api/catalog/quick-actions")
+        self.assertEqual(status, 200)
+        actions = json.loads(body.decode("utf-8"))
+        self.assertGreaterEqual(len(actions), 6)
+        for action in actions:
+            metrics = ",".join(action.get("metrics", []))
+            if action["mode"] == "compare":
+                path = f"/api/compare?template={action['template']}&base=2025-02-01&target=2026-04-01&metrics={metrics}"
+                status, content_type, body = self.request(path)
+                self.assertEqual(status, 200, action["code"])
+                payload = json.loads(body.decode("utf-8"))
+                self.assertIn("rows", payload)
+            else:
+                post_filter = f"&post_filter={action['post_filter']}" if action.get("post_filter") else ""
+                path = f"/api/query?template={action['template']}&start=2025-02-01&end=2026-04-01&metrics={metrics}{post_filter}"
+                status, content_type, body = self.request(path)
+                self.assertEqual(status, 200, action["code"])
+                payload = json.loads(body.decode("utf-8"))
+                self.assertIn("rows", payload)
+                self.assertIn("totals", payload)
 
 
 class StaticFilesTests(unittest.TestCase):

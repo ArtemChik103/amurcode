@@ -67,6 +67,13 @@ ASSISTANT_ENABLED=auto
 python -m unittest discover -s tests -v
 ```
 
+В набор входят backend-тесты, безбраузерные проверки Vue-логики через Node VM и Playwright-тесты реальных кликов в Chromium. Для новой машины:
+
+```powershell
+python -m pip install playwright
+python -m playwright install chromium
+```
+
 ## Ограничения
 
 - Данные хранятся in-memory.

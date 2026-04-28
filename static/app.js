@@ -405,7 +405,8 @@ createApp({
     },
 
     applyQuickAction(action) {
-      this.applyAction(action);
+      const { code, ...cleanAction } = action;
+      this.applyAction(cleanAction);
     },
 
     onSmartInput() {
@@ -419,6 +420,19 @@ createApp({
       const suggestions = [];
       const add = (code, title, description, action) => suggestions.push({ code, title, description, action });
       const fullMetrics = ["limit", "obligation", "cash", "agreement", "contract", "payment", "buau"];
+      const requestedTemplate = lower.includes("скк") || lower.includes("6105")
+        ? "skk"
+        : lower.includes("кик") || lower.includes("978")
+          ? "kik"
+          : lower.includes("970") || lower.includes("2/3")
+            ? "two_thirds"
+            : ["окв", "капитал", "капвлож"].some((word) => lower.includes(word))
+              ? "okv"
+              : this.filters.template;
+
+      if (["сравн", "измен", "динамик"].some((word) => lower.includes(word))) {
+        add("apply_compare", "Сравнить периоды", "Показать изменения между первой и последней датой", { mode: "compare", template: requestedTemplate, metrics: this.activeMetricCodes });
+      }
 
       if (lower.includes("6105") || lower.includes("скк")) {
         add("apply_skk", "Похоже, вы ищете СКК", "Применить готовый отчёт СКК", { mode: "slice", template: "skk", q: "", code: "", metrics: fullMetrics });
@@ -431,9 +445,6 @@ createApp({
       }
       if (["окв", "капитал", "капвлож"].some((word) => lower.includes(word))) {
         add("apply_okv", "Похоже, вы ищете ОКВ", "Показать объекты капитальных вложений", { mode: "slice", template: "okv", q: "", code: "", metrics: ["limit", "obligation", "cash", "contract", "payment", "buau"] });
-      }
-      if (["сравн", "измен", "динамик"].some((word) => lower.includes(word))) {
-        add("apply_compare", "Сравнить периоды", "Показать изменения между первой и последней датой", { mode: "compare", template: lower.includes("скк") ? "skk" : this.filters.template, metrics: this.activeMetricCodes });
       }
       if (["касс", "исполн", "платеж"].some((word) => lower.includes(word))) {
         add("apply_cash", "Показать исполнение и оплаты", "Оставить кассу, платежи и выплаты БУ/АУ", { mode: this.mode, template: this.filters.template, q: value, metrics: ["cash", "payment", "buau"] });
