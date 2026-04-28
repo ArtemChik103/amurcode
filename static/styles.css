@@ -21,6 +21,12 @@
   --success: #34d399;
   --sidebar: #07111d;
   --sidebar-2: #0d1b2a;
+  --sidebar-text: #ffffff;
+  --sidebar-muted: rgba(232, 241, 247, 0.74);
+  --sidebar-label: rgba(232, 241, 247, 0.72);
+  --sidebar-line: rgba(255, 255, 255, 0.12);
+  --sidebar-control: rgba(255, 255, 255, 0.07);
+  --sidebar-control-text: #f7fbff;
   --shadow: 0 18px 50px rgba(0, 0, 0, 0.32);
   --chart-grid: rgba(145, 162, 180, 0.14);
   --chart-axis: rgba(145, 162, 180, 0.34);
@@ -49,8 +55,14 @@
   --warn: #b45309;
   --danger: #b42318;
   --success: #157f3b;
-  --sidebar: #0b253c;
-  --sidebar-2: #102f4c;
+  --sidebar: #ffffff;
+  --sidebar-2: #f2f7fb;
+  --sidebar-text: #0f1f2e;
+  --sidebar-muted: #607284;
+  --sidebar-label: #607284;
+  --sidebar-line: rgba(80, 100, 120, 0.16);
+  --sidebar-control: rgba(15, 118, 110, 0.06);
+  --sidebar-control-text: #0f1f2e;
   --shadow: 0 16px 45px rgba(23, 32, 38, 0.1);
   --chart-grid: rgba(96, 114, 132, 0.14);
   --chart-axis: rgba(96, 114, 132, 0.3);
@@ -143,7 +155,7 @@ p {
   border-right: 1px solid var(--line);
   background:
     linear-gradient(180deg, var(--sidebar), var(--sidebar-2));
-  color: #fff;
+  color: var(--sidebar-text);
 }
 
 .sidebar::-webkit-scrollbar,
@@ -185,14 +197,14 @@ pre::-webkit-scrollbar-thumb {
 
 .brand h1 {
   max-width: 190px;
-  color: #fff;
+  color: var(--sidebar-text);
   font-size: 21px;
   line-height: 1.08;
 }
 
 .brand p {
   margin-top: 5px;
-  color: rgba(232, 241, 247, 0.74);
+  color: var(--sidebar-muted);
   font-size: 12px;
   line-height: 1.35;
 }
@@ -201,15 +213,15 @@ pre::-webkit-scrollbar-thumb {
   display: grid;
   grid-template-columns: 1fr 1fr;
   padding: 3px;
-  border: 1px solid rgba(255, 255, 255, 0.13);
+  border: 1px solid var(--sidebar-line);
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--sidebar-control);
 }
 
 .mode-switch button {
   border-color: transparent;
   background: transparent;
-  color: rgba(232, 241, 247, 0.84);
+  color: var(--sidebar-control-text);
 }
 
 .mode-switch button:first-child,
@@ -228,9 +240,9 @@ pre::-webkit-scrollbar-thumb {
   align-items: center;
   justify-content: center;
   gap: 9px;
-  border-color: rgba(255, 255, 255, 0.14);
-  background: rgba(255, 255, 255, 0.07);
-  color: #f7fbff;
+  border-color: var(--sidebar-line);
+  background: var(--sidebar-control);
+  color: var(--sidebar-control-text);
 }
 
 .theme-icon {
@@ -239,7 +251,7 @@ pre::-webkit-scrollbar-thumb {
   height: 22px;
   place-items: center;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.12);
+  background: var(--accent-soft);
   color: var(--accent);
   font-size: 13px;
 }
@@ -255,21 +267,21 @@ label span,
 .filter-group-title {
   display: block;
   margin-bottom: 6px;
-  color: rgba(232, 241, 247, 0.72);
+  color: var(--sidebar-label);
   font-size: 12px;
 }
 
 .filter-group-title,
 .section-title {
   margin-top: 4px;
-  color: #f7fbff;
+  color: var(--sidebar-text);
   font-weight: 800;
 }
 
 .filter-group-title:not(:first-child),
 .section-title {
   padding-top: 10px;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  border-top: 1px solid var(--sidebar-line);
 }
 
 .date-grid {
@@ -287,7 +299,7 @@ label span,
   align-items: center;
   gap: 9px;
   min-height: 28px;
-  color: #f7fbff;
+  color: var(--sidebar-text);
 }
 
 .metric-check input {
@@ -298,7 +310,7 @@ label span,
 
 .metric-check span {
   margin: 0;
-  color: rgba(247, 251, 255, 0.92);
+  color: var(--sidebar-text);
   font-weight: 600;
 }
 
@@ -310,13 +322,13 @@ label span,
 }
 
 .ghost {
-  background: rgba(255, 255, 255, 0.88);
-  color: #0f1720;
-}
-
-:root[data-theme="dark"] .ghost {
   background: rgba(255, 255, 255, 0.1);
   color: #e8eef5;
+}
+
+:root[data-theme="light"] .ghost {
+  background: #ffffff;
+  color: #0f1f2e;
 }
 
 .primary {
