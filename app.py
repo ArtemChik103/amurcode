@@ -15,6 +15,26 @@ from urllib.parse import parse_qs, urlparse
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "case"
 STATIC_DIR = ROOT / "static"
+QUALITY_ISSUES: list[dict] = []
+LOAD_STATS: dict[str, dict[str, int]] = {}
+METRIC_KEYS = ["limit", "obligation", "cash", "agreement", "contract", "payment", "buau"]
+METRICS = {
+    "limit": "Лимиты",
+    "obligation": "БО",
+    "cash": "Касса",
+    "agreement": "Соглашения",
+    "contract": "Контракты",
+    "payment": "Платежи",
+    "buau": "БУ/АУ",
+}
+TEMPLATES = {
+    "all": {"label": "Все данные", "description": "Без предметного шаблона"},
+    "kik": {"label": "КИК", "description": "КЦСР содержит 978 с 6-й позиции"},
+    "skk": {"label": "СКК", "description": "КЦСР содержит 6105 с 6-й позиции"},
+    "two_thirds": {"label": "2/3", "description": "КЦСР содержит 970 с 6-й позиции"},
+    "okv": {"label": "ОКВ", "description": "Капитальные вложения по КВР"},
+}
+CAPITAL_KVR = {"400", "410", "411", "412", "413", "414", "415", "416", "417"}
 
 SNAPSHOT_RE = re.compile(r"на\s+(\d{2}\.\d{2}\.\d{4})")
 MONTHS = {
@@ -33,7 +53,36 @@ MONTHS = {
 }
 
 
-def parse_amount(value: object) -> float:
+def relative_source(path: Path | str) -> str:
+    try:
+        return str(Path(path).resolve().relative_to(ROOT)).replace("\\", "/")
+    except ValueError:
+        return str(path).replace("\\", "/")
+
+
+def add_quality_issue(
+    source_file: str,
+    source_row: int | str,
+    severity: str,
+    code: str,
+    message: str,
+    field: str = "",
+    value: object = "",
+) -> None:
+    QUALITY_ISSUES.append(
+        {
+            "source_file": source_file,
+            "source_row": source_row,
+            "severity": severity,
+            "code": code,
+            "message": message,
+            "field": field,
+            "value": "" if value is None else str(value),
+        }
+    )
+
+
+def parse_amount(value: object, source_file: str = "", source_row: int | str = "", field: str = "") -> float:
     if value is None:
         return 0.0
     text = str(value).strip().replace("\xa0", " ")
@@ -47,10 +96,20 @@ def parse_amount(value: object) -> float:
     try:
         return float(text)
     except ValueError:
+        if source_file or field:
+            add_quality_issue(
+                source_file,
+                source_row,
+                "warning",
+                "amount_parse_failed",
+                "Не удалось распарсить сумму",
+                field,
+                value,
+            )
         return 0.0
 
 
-def parse_date(value: object) -> str:
+def parse_date(value: object, source_file: str = "", source_row: int | str = "", field: str = "") -> str:
     if value is None:
         return ""
     text = str(value).strip()
@@ -61,7 +120,17 @@ def parse_date(value: object) -> str:
             return datetime.strptime(text, fmt).date().isoformat()
         except ValueError:
             pass
-    return text[:10]
+    if source_file or field:
+        add_quality_issue(
+            source_file,
+            source_row,
+            "warning",
+            "date_parse_failed",
+            "Не удалось распарсить дату",
+            field,
+            value,
+        )
+    return ""
 
 
 def normalize_code(value: object) -> str:
@@ -70,6 +139,42 @@ def normalize_code(value: object) -> str:
 
 def display_code(value: object) -> str:
     return str(value or "").strip()
+
+
+def make_record(records: list[dict], source_file: str, source_row: int, raw: dict, **fields: object) -> dict:
+    record = {
+        "id": f"r{len(records) + 1}",
+        "source_file": source_file,
+        "source_row": source_row,
+        "raw": dict(raw),
+    }
+    record.update(fields)
+    return record
+
+
+def selected_metrics(params: dict[str, list[str]] | None = None) -> list[str]:
+    if not params:
+        return list(METRIC_KEYS)
+    raw = params.get("metrics", [""])[0].strip()
+    if not raw:
+        return list(METRIC_KEYS)
+    result = [metric for metric in raw.split(",") if metric in METRIC_KEYS]
+    return result or list(METRIC_KEYS)
+
+
+def matches_template(record: dict, template: str) -> bool:
+    if not template or template == "all":
+        return True
+    code = record.get("object_code_norm", "")
+    if template == "kik":
+        return code[5:8] == "978"
+    if template == "skk":
+        return code[5:9] == "6105"
+    if template == "two_thirds":
+        return code[5:8] == "970"
+    if template == "okv":
+        return normalize_code(record.get("kvr")) in CAPITAL_KVR
+    return True
 
 
 def rcb_snapshot_from_rows(rows: list[list[str]], fallback_name: str) -> str:
@@ -120,11 +225,14 @@ class DataStore:
 
 
 def load_data() -> DataStore:
+    QUALITY_ISSUES.clear()
+    LOAD_STATS.clear()
     records: list[dict] = []
     load_rcb(records)
     load_agreements(records)
     load_state_task(records)
     load_buau(records)
+    enrich_records(records)
 
     budgets = sorted({r["budget"] for r in records if r.get("budget")})
     sources = sorted({r["source"] for r in records})
@@ -139,8 +247,42 @@ def load_data() -> DataStore:
         "sources": sources,
         "snapshots": snapshots,
         "objects": objects[:500],
+        "load_stats": LOAD_STATS,
+        "quality": quality_summary(),
     }
     return DataStore(records=records, meta=meta)
+
+
+def enrich_records(records: list[dict]) -> None:
+    source_counts: dict[str, int] = defaultdict(int)
+    for index, record in enumerate(records, start=1):
+        record.setdefault("id", f"r{index}")
+        record.setdefault("source_file", "")
+        record.setdefault("source_row", "")
+        record.setdefault("raw", {key: value for key, value in record.items() if key not in {"raw"}})
+        source_counts[record.get("source", "")] += 1
+    for source, count in source_counts.items():
+        LOAD_STATS[source or "unknown"] = {"read_rows": count, "records": count, "warnings": 0, "errors": 0}
+
+
+def quality_summary() -> dict[str, int]:
+    return {
+        "warnings": sum(1 for issue in QUALITY_ISSUES if issue["severity"] == "warning"),
+        "errors": sum(1 for issue in QUALITY_ISSUES if issue["severity"] == "error"),
+    }
+
+
+def start_load_stats(path: Path) -> dict[str, int]:
+    key = relative_source(path)
+    stats = {"read_rows": 0, "records": 0, "warnings": 0, "errors": 0}
+    LOAD_STATS[key] = stats
+    return stats
+
+
+def finish_load_stats(stats: dict[str, int], issue_start: int) -> None:
+    issues = QUALITY_ISSUES[issue_start:]
+    stats["warnings"] = sum(1 for issue in issues if issue["severity"] == "warning")
+    stats["errors"] = sum(1 for issue in issues if issue["severity"] == "error")
 
 
 def load_rcb(records: list[dict]) -> None:
@@ -346,6 +488,7 @@ def apply_filters(records: list[dict], params: dict[str, list[str]]) -> list[dic
     source = params.get("source", [""])[0].strip()
     start = params.get("start", [""])[0].strip()
     end = params.get("end", [""])[0].strip()
+    template = params.get("template", ["all"])[0].strip() or "all"
 
     result = []
     for record in records:
@@ -361,6 +504,8 @@ def apply_filters(records: list[dict], params: dict[str, list[str]]) -> list[dic
             continue
         if source and record.get("source") != source:
             continue
+        if not matches_template(record, template):
+            continue
         date_value = record.get("snapshot") or record.get("event_date") or ""
         if start and date_value and date_value < start:
             continue
@@ -370,10 +515,10 @@ def apply_filters(records: list[dict], params: dict[str, list[str]]) -> list[dic
     return result
 
 
-def aggregate(records: list[dict]) -> dict:
+def aggregate(records: list[dict], metrics: list[str] | None = None) -> dict:
     groups: dict[tuple[str, str], dict] = {}
     timeline: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
-    metric_keys = ["limit", "obligation", "cash", "agreement", "contract", "payment", "buau"]
+    metric_keys = metrics or list(METRIC_KEYS)
 
     totals = {key: 0.0 for key in metric_keys}
     for record in records:
@@ -386,7 +531,7 @@ def aggregate(records: list[dict]) -> dict:
                 "object_name": record.get("object_name") or "",
                 "budget": key[1],
                 "sources": set(),
-                **{metric: 0.0 for metric in metric_keys},
+                **{metric: 0.0 for metric in METRIC_KEYS},
             },
         )
         if not row["object_code"] and record.get("object_code"):
@@ -399,11 +544,12 @@ def aggregate(records: list[dict]) -> dict:
             row["object_name"] = record["object_name"]
         row["sources"].add(record["source"])
         point = record.get("snapshot") or record.get("event_date") or "unknown"
-        for metric in metric_keys:
+        for metric in METRIC_KEYS:
             value = float(record.get(metric) or 0.0)
-            row[metric] += value
-            totals[metric] += value
-            if point != "unknown":
+            if metric in metric_keys:
+                row[metric] += value
+                totals[metric] += value
+            if metric in metric_keys and point != "unknown":
                 timeline[point][metric] += value
 
     rows = []
@@ -428,6 +574,95 @@ def aggregate(records: list[dict]) -> dict:
     }
 
 
+def catalog_objects(records: list[dict], params: dict[str, list[str]]) -> list[dict]:
+    query = params.get("q", [""])[0].strip().lower()
+    template = params.get("template", ["all"])[0].strip() or "all"
+    seen: set[tuple[str, str, str]] = set()
+    objects = []
+    for record in records:
+        if not matches_template(record, template):
+            continue
+        haystack = " ".join(
+            str(record.get(key, ""))
+            for key in ("object_code", "object_name", "budget", "counterparty", "document_number")
+        ).lower()
+        if query and query not in haystack:
+            continue
+        item = (
+            record.get("object_code", ""),
+            record.get("object_name", ""),
+            record.get("budget", ""),
+        )
+        if item in seen:
+            continue
+        seen.add(item)
+        objects.append({"code": item[0], "name": item[1], "budget": item[2]})
+        if len(objects) >= 200:
+            break
+    return objects
+
+
+def trace_record(record_id: str) -> dict | None:
+    for record in STORE.records:
+        if record.get("id") == record_id:
+            normalized = {key: value for key, value in record.items() if key not in {"raw"}}
+            return {
+                "id": record.get("id"),
+                "source": record.get("source"),
+                "source_file": record.get("source_file", ""),
+                "source_row": record.get("source_row", ""),
+                "raw": record.get("raw", {}),
+                "normalized": normalized,
+            }
+    return None
+
+
+def compare_periods(params: dict[str, list[str]]) -> dict:
+    base = params.get("base", [""])[0].strip()
+    target = params.get("target", [""])[0].strip()
+    metrics = selected_metrics(params)
+    filter_params = {key: value for key, value in params.items() if key not in {"start", "end", "base", "target"}}
+    filtered = apply_filters(STORE.records, filter_params)
+    base_rows = aggregate([record for record in filtered if record.get("snapshot") == base], metrics)["rows"]
+    target_rows = aggregate([record for record in filtered if record.get("snapshot") == target], metrics)["rows"]
+    by_key: dict[tuple[str, str], dict] = {}
+    for label, rows in (("base", base_rows), ("target", target_rows)):
+        for row in rows:
+            key = (row.get("object_code") or row.get("object_name", ""), row.get("budget", ""))
+            item = by_key.setdefault(
+                key,
+                {
+                    "object_code": row.get("object_code", ""),
+                    "object_name": row.get("object_name", ""),
+                    "budget": row.get("budget", ""),
+                    "sources": row.get("sources", ""),
+                    "metrics": {metric: {"base": 0.0, "target": 0.0, "delta": 0.0, "delta_percent": None} for metric in metrics},
+                },
+            )
+            if row.get("sources"):
+                item["sources"] = row["sources"]
+            for metric in metrics:
+                item["metrics"][metric][label] = row.get(metric, 0.0)
+    rows = []
+    for item in by_key.values():
+        total_delta = 0.0
+        for metric in metrics:
+            values = item["metrics"][metric]
+            values["delta"] = values["target"] - values["base"]
+            values["delta_percent"] = (values["delta"] / values["base"] * 100.0) if values["base"] else None
+            total_delta += abs(values["delta"])
+        item["total_delta"] = total_delta
+        rows.append(item)
+    rows.sort(key=lambda item: item["total_delta"], reverse=True)
+    return {
+        "base": base,
+        "target": target,
+        "metrics": metrics,
+        "available_dates": STORE.meta["snapshots"],
+        "rows": rows[:300],
+    }
+
+
 STORE = load_data()
 
 
@@ -449,13 +684,47 @@ class Handler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/query":
             params = parse_qs(parsed.query)
             filtered = apply_filters(STORE.records, params)
-            self.write_json(aggregate(filtered))
+            self.write_json(aggregate(filtered, selected_metrics(params)))
+            return
+        if parsed.path == "/api/compare":
+            self.write_json(compare_periods(parse_qs(parsed.query)))
+            return
+        if parsed.path == "/api/quality":
+            self.write_json({"issues": QUALITY_ISSUES, "summary": quality_summary(), "load_stats": LOAD_STATS})
+            return
+        if parsed.path == "/api/trace":
+            record_id = parse_qs(parsed.query).get("id", [""])[0]
+            payload = trace_record(record_id)
+            if payload is None:
+                self.write_json({"error": "record_not_found"}, status=404)
+            else:
+                self.write_json(payload)
+            return
+        if parsed.path == "/api/catalog/dates":
+            self.write_json(STORE.meta["snapshots"])
+            return
+        if parsed.path == "/api/catalog/sources":
+            self.write_json(STORE.meta["sources"])
+            return
+        if parsed.path == "/api/catalog/budgets":
+            self.write_json(STORE.meta["budgets"])
+            return
+        if parsed.path == "/api/catalog/templates":
+            self.write_json(
+                [{"code": code, "label": item["label"], "description": item["description"]} for code, item in TEMPLATES.items()]
+            )
+            return
+        if parsed.path == "/api/catalog/metrics":
+            self.write_json([{"code": code, "label": label} for code, label in METRICS.items()])
+            return
+        if parsed.path == "/api/catalog/objects":
+            self.write_json(catalog_objects(STORE.records, parse_qs(parsed.query)))
             return
         super().do_GET()
 
-    def write_json(self, payload: object) -> None:
+    def write_json(self, payload: object, status: int = 200) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
