@@ -255,12 +255,20 @@ def load_data() -> DataStore:
 
 def enrich_records(records: list[dict]) -> None:
     source_counts: dict[str, int] = defaultdict(int)
+    source_folders = {
+        "РЧБ": "case/1_RCB",
+        "Соглашения": "case/2_Agreements",
+        "ГЗ: контракты": "case/3_StateTask",
+        "ГЗ: платежи": "case/3_StateTask",
+        "БУАУ": "case/4_BUAU_Export",
+    }
     for index, record in enumerate(records, start=1):
+        source = record.get("source", "")
+        source_counts[source] += 1
         record.setdefault("id", f"r{index}")
-        record.setdefault("source_file", "")
-        record.setdefault("source_row", "")
+        record.setdefault("source_file", source_folders.get(source, ""))
+        record.setdefault("source_row", source_counts[source])
         record.setdefault("raw", {key: value for key, value in record.items() if key not in {"raw"}})
-        source_counts[record.get("source", "")] += 1
     for source, count in source_counts.items():
         LOAD_STATS[source or "unknown"] = {"read_rows": count, "records": count, "warnings": 0, "errors": 0}
 

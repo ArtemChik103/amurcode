@@ -93,6 +93,8 @@ class DataLoadTests(unittest.TestCase):
         self.assertIn("source_file", record)
         self.assertIn("source_row", record)
         self.assertIn("raw", record)
+        self.assertTrue(record["source_file"])
+        self.assertTrue(record["source_row"])
 
     def test_metric_selection_limits_totals(self):
         result = app.aggregate(self.store.records, ["limit", "cash"])
