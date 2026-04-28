@@ -7,111 +7,226 @@
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
-    <header class="topbar">
-      <div>
-        <h1>Конструктор аналитических выборок</h1>
-        <p>РЧБ, соглашения, госзаказ и БУ/АУ в одной витрине</p>
-      </div>
-      <button id="exportCsv" class="icon-button" title="Экспортировать таблицу в CSV" aria-label="Экспорт CSV">
-        <span aria-hidden="true">⇩</span>
-        CSV
-      </button>
-    </header>
-
-    <main>
-      <section class="status" aria-label="Статус загрузки">
-        <span id="loadStatus">Загрузка данных...</span>
-        <span id="qualityStatus"></span>
-      </section>
-
-      <section class="modebar" aria-label="Режим">
-        <button id="sliceMode" class="active" type="button">Срез</button>
-        <button id="compareMode" type="button">Сравнение</button>
-      </section>
-
-      <section class="filters" aria-label="Фильтры">
-        <label>
-          <span>Поиск</span>
-          <input id="q" type="search" placeholder="объект, бюджет, получатель, номер" />
-        </label>
-        <label>
-          <span>Код</span>
-          <input id="code" type="search" placeholder="970, 6105, КЦСР" />
-        </label>
-        <label>
-          <span>Шаблон</span>
-          <select id="template"></select>
-        </label>
-        <label>
-          <span>Бюджет</span>
-          <select id="budget"></select>
-        </label>
-        <label>
-          <span>Источник</span>
-          <select id="source"></select>
-        </label>
-        <label class="slice-only">
-          <span>С</span>
-          <input id="start" type="date" />
-        </label>
-        <label class="slice-only">
-          <span>По</span>
-          <input id="end" type="date" />
-        </label>
-        <label class="compare-only hidden">
-          <span>База</span>
-          <select id="baseDate"></select>
-        </label>
-        <label class="compare-only hidden">
-          <span>Цель</span>
-          <select id="targetDate"></select>
-        </label>
-        <button id="reset" class="secondary" type="button" title="Сбросить фильтры" aria-label="Сбросить">↺</button>
-      </section>
-
-      <section class="metric-filter" aria-label="Метрики" id="metricFilter"></section>
-
-      <section class="kpis" aria-label="Показатели" id="kpis"></section>
-
-      <section class="workspace">
-        <div class="panel chart-panel slice-panel">
-          <div class="panel-head">
-            <h2 id="resultTitle">Динамика</h2>
-            <span id="recordCount"></span>
+    <div id="app" v-cloak>
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">АО</div>
+          <div>
+            <h1>Конструктор выборок</h1>
+            <p>РЧБ, соглашения, госзаказ, БУ/АУ</p>
           </div>
-          <canvas id="chart" height="260"></canvas>
         </div>
 
-        <div class="panel slice-panel">
+        <div class="mode-switch" aria-label="Режим">
+          <button type="button" :class="{ active: mode === 'slice' }" @click="setMode('slice')">Срез</button>
+          <button type="button" :class="{ active: mode === 'compare' }" @click="setMode('compare')">Сравнение</button>
+        </div>
+
+        <section class="filter-stack" aria-label="Фильтры">
+          <label>
+            <span>Поиск</span>
+            <input v-model.trim="filters.q" type="search" placeholder="объект, бюджет, получатель" @input="scheduleLoad" />
+          </label>
+          <label>
+            <span>Код</span>
+            <input v-model.trim="filters.code" type="search" placeholder="970, 6105, КЦСР" @input="scheduleLoad" />
+          </label>
+          <label>
+            <span>Шаблон</span>
+            <select v-model="filters.template">
+              <option v-for="template in templates" :key="template.code" :value="template.code">{{ template.label }}</option>
+            </select>
+          </label>
+          <label>
+            <span>Бюджет</span>
+            <select v-model="filters.budget">
+              <option value="">Все бюджеты</option>
+              <option v-for="budget in meta.budgets" :key="budget" :value="budget">{{ budget }}</option>
+            </select>
+          </label>
+          <label>
+            <span>Источник</span>
+            <select v-model="filters.source">
+              <option value="">Все источники</option>
+              <option v-for="source in meta.sources" :key="source" :value="source">{{ source }}</option>
+            </select>
+          </label>
+
+          <div v-if="mode === 'slice'" class="date-grid">
+            <label>
+              <span>С</span>
+              <input v-model="filters.start" type="date" />
+            </label>
+            <label>
+              <span>По</span>
+              <input v-model="filters.end" type="date" />
+            </label>
+          </div>
+
+          <div v-else class="date-grid">
+            <label>
+              <span>База</span>
+              <select v-model="filters.base">
+                <option v-for="date in meta.snapshots" :key="date" :value="date">{{ date }}</option>
+              </select>
+            </label>
+            <label>
+              <span>Цель</span>
+              <select v-model="filters.target">
+                <option v-for="date in meta.snapshots" :key="date" :value="date">{{ date }}</option>
+              </select>
+            </label>
+          </div>
+        </section>
+
+        <section class="metric-box" aria-label="Метрики">
+          <div class="section-title">Метрики</div>
+          <label v-for="metric in metrics" :key="metric.code" class="metric-check">
+            <input type="checkbox" :value="metric.code" v-model="selectedMetrics" />
+            <span>{{ metric.label }}</span>
+          </label>
+        </section>
+
+        <div class="side-actions">
+          <button type="button" class="ghost" @click="resetFilters">Сбросить</button>
+          <button type="button" class="primary" @click="exportCsv">Экспорт CSV</button>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <div class="eyebrow">MVP без БД · {{ activeTemplateLabel }}</div>
+            <h2>{{ mode === 'slice' ? 'Аналитический срез' : 'Сравнение периодов' }}</h2>
+          </div>
+          <div class="status-strip">
+            <span v-if="loading.meta || loading.query || loading.compare">Загрузка...</span>
+            <span>{{ meta.records || 0 }} записей</span>
+            <span>{{ meta.sources.length || 0 }} источников</span>
+            <span :class="{ warn: quality.summary.warnings || quality.summary.errors }">
+              {{ quality.summary.warnings || 0 }} предупреждений · {{ quality.summary.errors || 0 }} ошибок
+            </span>
+          </div>
+        </header>
+
+        <div v-if="error" class="error-banner">{{ error }}</div>
+
+        <section class="kpi-grid" aria-label="Показатели">
+          <article v-for="metric in activeMetricObjects" :key="metric.code" class="kpi-card">
+            <span>{{ metric.label }}</span>
+            <strong>{{ formatMoney(query.totals[metric.code]) }}</strong>
+            <small>{{ metricHint(metric.code) }}</small>
+          </article>
+        </section>
+
+        <section v-if="mode === 'slice'" class="workspace-grid">
+          <article class="panel chart-panel">
+            <div class="panel-head">
+              <div>
+                <h3>Динамика</h3>
+                <p>{{ query.count || 0 }} записей в выборке</p>
+              </div>
+            </div>
+            <canvas ref="chart" height="280"></canvas>
+          </article>
+
+          <article class="panel table-panel">
+            <div class="panel-head">
+              <div>
+                <h3>Сводная таблица</h3>
+                <p>{{ query.rows.length }} строк, сортировка по сумме выбранных метрик</p>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Код</th>
+                    <th>Объект</th>
+                    <th>Бюджет</th>
+                    <th>Источники</th>
+                    <th v-for="metric in activeMetricObjects" :key="metric.code" class="number">{{ metric.label }}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-if="loading.query" class="loading-row">
+                    <td :colspan="4 + activeMetricObjects.length">Загрузка...</td>
+                  </tr>
+                  <tr v-else-if="!query.rows.length" class="empty-row">
+                    <td :colspan="4 + activeMetricObjects.length">Нет данных по выбранным фильтрам</td>
+                  </tr>
+                  <template v-else>
+                    <tr v-for="row in query.rows" :key="row.object_code + row.budget">
+                      <td class="code">{{ row.object_code }}</td>
+                      <td class="truncate" :title="row.object_name">{{ row.object_name }}</td>
+                      <td class="truncate" :title="row.budget">{{ row.budget }}</td>
+                      <td><span class="pill">{{ row.sources }}</span></td>
+                      <td v-for="metric in activeMetricObjects" :key="metric.code" class="number">{{ formatMoney(row[metric.code]) }}</td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </article>
+        </section>
+
+        <section v-else class="panel table-panel">
           <div class="panel-head">
-            <h2>Сводная таблица</h2>
-            <span id="rowCount"></span>
+            <div>
+              <h3>Сравнение {{ filters.base }} → {{ filters.target }}</h3>
+              <p>{{ compare.rows.length }} строк, строго по snapshot выбранных дат</p>
+            </div>
           </div>
           <div class="table-wrap">
-            <table id="summaryTable">
-              <thead id="summaryHead"></thead>
-              <tbody id="summaryBody"></tbody>
+            <table>
+              <thead>
+                <tr>
+                  <th>Код</th>
+                  <th>Объект</th>
+                  <th>Бюджет</th>
+                  <template v-for="metric in activeMetricObjects" :key="metric.code">
+                    <th class="number">{{ metric.label }} база</th>
+                    <th class="number">{{ metric.label }} цель</th>
+                    <th class="number">Δ</th>
+                    <th class="number">Δ %</th>
+                  </template>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-if="loading.compare" class="loading-row">
+                  <td :colspan="3 + activeMetricObjects.length * 4">Загрузка...</td>
+                </tr>
+                <tr v-else-if="!compare.rows.length" class="empty-row">
+                  <td :colspan="3 + activeMetricObjects.length * 4">Нет данных по выбранным фильтрам</td>
+                </tr>
+                <template v-else>
+                  <tr v-for="row in compare.rows" :key="row.object_code + row.budget">
+                    <td class="code">{{ row.object_code }}</td>
+                    <td class="truncate" :title="row.object_name">{{ row.object_name }}</td>
+                    <td class="truncate" :title="row.budget">{{ row.budget }}</td>
+                    <template v-for="metric in activeMetricObjects" :key="metric.code">
+                      <td class="number">{{ formatMoney(row.metrics[metric.code]?.base) }}</td>
+                      <td class="number">{{ formatMoney(row.metrics[metric.code]?.target) }}</td>
+                      <td class="number delta" :class="deltaClass(row.metrics[metric.code]?.delta)">
+                        {{ formatMoney(row.metrics[metric.code]?.delta) }}
+                      </td>
+                      <td class="number delta" :class="deltaClass(row.metrics[metric.code]?.delta)">
+                        {{ formatPercent(row.metrics[metric.code]?.delta_percent) }}
+                      </td>
+                    </template>
+                  </tr>
+                </template>
+              </tbody>
             </table>
           </div>
-        </div>
+        </section>
 
-        <div class="panel compare-panel hidden">
+        <section v-if="mode === 'slice'" class="panel table-panel detail-panel">
           <div class="panel-head">
-            <h2>Сравнение периодов</h2>
-            <span id="compareCount"></span>
-          </div>
-          <div class="table-wrap">
-            <table id="compareTable">
-              <thead id="compareHead"></thead>
-              <tbody id="compareBody"></tbody>
-            </table>
-          </div>
-        </div>
-
-        <div class="panel">
-          <div class="panel-head">
-            <h2>Детализация</h2>
-            <span id="detailCount"></span>
+            <div>
+              <h3>Детализация</h3>
+              <p>{{ query.details.length }} записей, trace доступен по каждой строке</p>
+            </div>
           </div>
           <div class="table-wrap compact">
             <table>
@@ -124,24 +239,48 @@
                   <th>Документ</th>
                   <th>Контрагент</th>
                   <th class="number">Сумма</th>
-                  <th>Trace</th>
+                  <th></th>
                 </tr>
               </thead>
-              <tbody id="detailBody"></tbody>
+              <tbody>
+                <tr v-if="loading.query" class="loading-row">
+                  <td colspan="8">Загрузка...</td>
+                </tr>
+                <tr v-else-if="!query.details.length" class="empty-row">
+                  <td colspan="8">Нет данных по выбранным фильтрам</td>
+                </tr>
+                <template v-else>
+                  <tr v-for="row in query.details" :key="row.id">
+                    <td>{{ row.event_date || row.snapshot }}</td>
+                    <td><span class="pill muted">{{ row.source }}</span></td>
+                    <td class="code">{{ row.object_code }}</td>
+                    <td class="truncate" :title="row.object_name">{{ row.object_name }}</td>
+                    <td>{{ row.document_number }}</td>
+                    <td class="truncate" :title="row.counterparty">{{ row.counterparty }}</td>
+                    <td class="number">{{ formatMoney(detailAmount(row)) }}</td>
+                    <td><button type="button" class="icon-only" @click="openTrace(row.id)" title="Открыть trace">↗</button></td>
+                  </tr>
+                </template>
+              </tbody>
             </table>
           </div>
+        </section>
+      </main>
+
+      <dialog ref="traceDialog" class="trace-dialog">
+        <div class="dialog-head">
+          <div>
+            <h3>Исходная строка</h3>
+            <p>{{ trace.source_file }} · строка {{ trace.source_row }}</p>
+          </div>
+          <button type="button" class="icon-only" @click="$refs.traceDialog.close()" title="Закрыть">×</button>
         </div>
-      </section>
-    </main>
+        <div v-if="loading.trace" class="skeleton">Загрузка исходной строки...</div>
+        <pre v-else>{{ prettyTrace }}</pre>
+      </dialog>
+    </div>
 
-    <dialog id="traceDialog">
-      <div class="dialog-head">
-        <h2>Исходная строка</h2>
-        <button id="closeTrace" type="button" aria-label="Закрыть">×</button>
-      </div>
-      <pre id="traceBody"></pre>
-    </dialog>
-
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
     <script src="/static/app.js"></script>
   </body>
 </html>

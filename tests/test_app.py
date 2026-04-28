@@ -194,6 +194,30 @@ class StaticFilesTests(unittest.TestCase):
         self.assertIn("/api/trace", script)
         self.assertIn("grid-template-columns", styles)
 
+    def test_vue_frontend_is_declarative(self):
+        index = (app.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        script = (app.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="app"', index)
+        self.assertIn("vue.global.prod.js", index)
+        self.assertIn("/static/app.js", index)
+        for marker in (
+            "createApp",
+            'mount("#app")',
+            "loadInitialData",
+            "loadData",
+            "loadCompare",
+            "openTrace",
+            "exportCsv",
+        ):
+            self.assertIn(marker, script)
+        for legacy_marker in (
+            "document.querySelector",
+            "innerHTML =",
+            "addEventListener",
+        ):
+            self.assertNotIn(legacy_marker, script)
+
 
 if __name__ == "__main__":
     unittest.main()
