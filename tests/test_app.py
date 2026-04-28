@@ -145,6 +145,11 @@ class DataLoadTests(unittest.TestCase):
         city = app.assistant_rule_based("6105 Благовещенск", {})
         self.assertEqual(city["action"]["template"], "skk")
         self.assertIn("Благовещенск", city["action"]["q"])
+        self.assertEqual(city["alternatives"][0]["label"], "Искать во всех данных")
+        self.assertTrue(city["alternatives"][0]["action"]["reset_scope"])
+        self.assertEqual(city["alternatives"][0]["action"]["code"], "")
+        self.assertEqual(city["alternatives"][0]["action"]["budget"], "")
+        self.assertEqual(city["alternatives"][0]["action"]["source"], "")
 
         compare = app.assistant_rule_based("сравни СКК", {})
         self.assertEqual(compare["intent"], "run_compare")

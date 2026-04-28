@@ -250,12 +250,14 @@ createApp({
       const result = [];
       if (this.filters.budget) result.push({ label: "Убрать бюджет", patch: { budget: "" } });
       if (this.filters.source) result.push({ label: "Искать во всех источниках", patch: { source: "" } });
-      if (this.filters.template !== "all") result.push({ label: "Искать во всех данных", patch: { template: "all" } });
+      if (this.filters.template !== "all" || this.filters.budget || this.filters.source || this.filters.code || this.filters.post_filter) {
+        result.push({ label: "Искать во всех данных", patch: { template: "all", budget: "", source: "", code: "", post_filter: "" } });
+      }
       if (this.filters.q || this.filters.code) result.push({ label: "Очистить поиск", patch: { q: "", code: "" } });
       if (this.filters.start !== this.meta.snapshots[0] || this.filters.end !== this.meta.snapshots[this.meta.snapshots.length - 1]) {
         result.push({ label: "Показать весь доступный период", patch: { start: this.meta.snapshots[0] || "", end: this.meta.snapshots[this.meta.snapshots.length - 1] || "" } });
       }
-      if (!result.length) result.push({ label: "Сбросить лишние фильтры", patch: { q: "", code: "", budget: "", source: "", template: "all" } });
+      if (!result.length) result.push({ label: "Сбросить лишние фильтры", patch: { q: "", code: "", budget: "", source: "", template: "all", post_filter: "" } });
       return result;
     },
 
@@ -500,6 +502,12 @@ createApp({
     },
 
     applyAction(action) {
+      if (action.reset_scope) {
+        this.filters.code = "";
+        this.filters.budget = "";
+        this.filters.source = "";
+        this.filters.post_filter = "";
+      }
       if (action.mode) this.mode = action.mode;
       if (action.template) this.filters.template = action.template;
       if (action.q !== undefined) this.filters.q = action.q;

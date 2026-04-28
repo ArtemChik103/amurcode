@@ -91,7 +91,7 @@ context.fetch = async (url, options = {}) => {
         intent: "run_query",
         message: "Я понял запрос как выборку: СКК.",
         action: { mode: "slice", template: "skk", q: "Благовещенск", metrics: ["limit", "cash"] },
-        alternatives: [{ label: "Все данные", action: { template: "all", q: "Благовещенск" } }],
+        alternatives: [{ label: "Искать во всех данных", action: { mode: "slice", template: "all", q: "Благовещенск", code: "", budget: "", source: "", post_filter: "", reset_scope: true } }],
       }),
     };
   }
@@ -242,9 +242,21 @@ function makeInstance() {
   vmApp.mode = "slice";
   assert.equal(vmApp.resultNarrative.severity, "warning");
   assert.match(vmApp.resultNarrative.title, /Найдено/);
+  vmApp.filters.template = "skk";
+  vmApp.filters.code = "6105";
+  vmApp.filters.budget = "Областной бюджет";
+  vmApp.filters.source = "РЧБ";
+  vmApp.filters.post_filter = "low_execution";
   vmApp.query.rows = [];
   assert.equal(vmApp.resultNarrative.severity, "empty");
-  assert.ok(vmApp.emptyStateSuggestions.some((item) => item.label === "Искать во всех данных"));
+  const allDataSuggestion = vmApp.emptyStateSuggestions.find((item) => item.label === "Искать во всех данных");
+  assert.ok(allDataSuggestion);
+  vmApp.applyEmptySuggestion(allDataSuggestion);
+  assert.equal(vmApp.filters.template, "all");
+  assert.equal(vmApp.filters.code, "");
+  assert.equal(vmApp.filters.budget, "");
+  assert.equal(vmApp.filters.source, "");
+  assert.equal(vmApp.filters.post_filter, "");
 
   vmApp.filters.budget = "Областной бюджет";
   vmApp.applyEmptySuggestion({ label: "Убрать бюджет", patch: { budget: "" } });
@@ -258,6 +270,16 @@ function makeInstance() {
   await vmApp.askAssistant();
   assert.equal(lastFetch.url, "/api/assistant");
   assert.equal(vmApp.assistant.response.action.template, "skk");
+  vmApp.filters.code = "6105";
+  vmApp.filters.budget = "Областной бюджет";
+  vmApp.filters.source = "РЧБ";
+  vmApp.filters.post_filter = "low_execution";
+  vmApp.applyAssistantAction(vmApp.assistant.response.alternatives[0].action);
+  assert.equal(vmApp.filters.template, "all");
+  assert.equal(vmApp.filters.code, "");
+  assert.equal(vmApp.filters.budget, "");
+  assert.equal(vmApp.filters.source, "");
+  assert.equal(vmApp.filters.post_filter, "");
   vmApp.applyAssistantAction(vmApp.assistant.response.action);
   assert.equal(vmApp.filters.template, "skk");
   assert.equal(vmApp.filters.q, "Благовещенск");

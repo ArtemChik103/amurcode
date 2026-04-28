@@ -795,7 +795,20 @@ def assistant_rule_based(message: str, context: dict | None = None) -> dict:
         "message": f"Я понял запрос как {'сравнение' if intent == 'run_compare' else 'выборку'}: {TEMPLATES.get(action['template'], TEMPLATES['all'])['label']}.{explanation}",
         "action": action,
         "alternatives": [
-            {"label": "Искать во всех данных", "action": {"mode": "slice", "template": "all", "q": search_text or message, "metrics": action["metrics"]}},
+            {
+                "label": "Искать во всех данных",
+                "action": {
+                    "mode": "slice",
+                    "template": "all",
+                    "q": search_text or message,
+                    "code": "",
+                    "budget": "",
+                    "source": "",
+                    "post_filter": "",
+                    "reset_scope": True,
+                    "metrics": action["metrics"],
+                },
+            },
         ],
         "rag_context": rag_context,
     }
