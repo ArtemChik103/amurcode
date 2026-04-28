@@ -26,6 +26,7 @@ createApp({
   data() {
     return {
       mode: "slice",
+      theme: "dark",
 
       meta: {
         records: 0,
@@ -177,6 +178,8 @@ createApp({
   },
 
   async mounted() {
+    this.theme = localStorage.getItem("analytics-theme") || "dark";
+    this.applyTheme();
     this.chartRedraw = debounce(() => this.drawChart(), 200);
     await this.loadInitialData();
     this.initialized = true;
@@ -303,9 +306,25 @@ createApp({
       }
     },
 
+    toggleTheme() {
+      this.theme = this.theme === "dark" ? "light" : "dark";
+      localStorage.setItem("analytics-theme", this.theme);
+      this.applyTheme();
+      nextTick(() => this.drawChart());
+    },
+
+    applyTheme() {
+      document.documentElement.dataset.theme = this.theme;
+    },
+
     drawChart() {
       const canvas = this.$refs.chart;
       if (!canvas || this.mode !== "slice") return;
+      const styles = getComputedStyle(document.documentElement);
+      const chartGrid = styles.getPropertyValue("--chart-grid").trim() || "#d9e0e4";
+      const chartAxis = styles.getPropertyValue("--chart-axis").trim() || "#63717b";
+      const chartText = styles.getPropertyValue("--chart-text").trim() || "#63717b";
+      const chartLine = styles.getPropertyValue("--chart-line").trim() || "#0f766e";
 
       const ratio = window.devicePixelRatio || 1;
       const width = canvas.clientWidth || canvas.parentElement?.clientWidth || 640;
@@ -323,7 +342,7 @@ createApp({
       }));
 
       if (!points.length) {
-        ctx.fillStyle = "#63717b";
+        ctx.fillStyle = chartText;
         ctx.font = "14px Arial";
         ctx.fillText("Нет данных", 24, 36);
         return;
@@ -332,7 +351,7 @@ createApp({
       const pad = { left: 72, right: 20, top: 20, bottom: 38 };
       const max = Math.max(1, ...points.map((point) => point.value));
 
-      ctx.strokeStyle = "#d9e0e4";
+      ctx.strokeStyle = chartAxis;
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(pad.left, pad.top);
@@ -342,22 +361,22 @@ createApp({
 
       [0, 0.5, 1].forEach((tick) => {
         const y = height - pad.bottom - tick * (height - pad.top - pad.bottom);
-        ctx.fillStyle = "#63717b";
+        ctx.fillStyle = chartText;
         ctx.font = "12px Arial";
         ctx.fillText(this.formatMoney(max * tick), 8, y + 4);
-        ctx.strokeStyle = "#edf2f5";
+        ctx.strokeStyle = chartGrid;
         ctx.beginPath();
         ctx.moveTo(pad.left, y);
         ctx.lineTo(width - pad.right, y);
         ctx.stroke();
       });
 
-      this.drawLine(ctx, points, "#0f766e", pad, width, height, max);
+      this.drawLine(ctx, points, chartLine, pad, width, height, max);
 
-      ctx.fillStyle = "#41505a";
+      ctx.fillStyle = chartText;
       ctx.font = "12px Arial";
       ctx.fillText("Выбранные метрики", Math.max(84, width - 180), 16);
-      ctx.fillStyle = "#63717b";
+      ctx.fillStyle = chartText;
       ctx.fillText(points[0].date, pad.left, height - 12);
       ctx.fillText(points[points.length - 1].date, Math.max(pad.left, width - pad.right - 78), height - 12);
     },

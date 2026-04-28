@@ -12,17 +12,23 @@
         <div class="brand">
           <div class="brand-mark">АО</div>
           <div>
-            <h1>Конструктор выборок</h1>
-            <p>РЧБ, соглашения, госзаказ, БУ/АУ</p>
+            <h1>Аналитика расходов</h1>
+            <p>Бюджеты, договоры и платежи</p>
           </div>
         </div>
 
         <div class="mode-switch" aria-label="Режим">
-          <button type="button" :class="{ active: mode === 'slice' }" @click="setMode('slice')">Срез</button>
-          <button type="button" :class="{ active: mode === 'compare' }" @click="setMode('compare')">Сравнение</button>
+          <button type="button" :class="{ active: mode === 'slice' }" @click="setMode('slice')">Обзор</button>
+          <button type="button" :class="{ active: mode === 'compare' }" @click="setMode('compare')">Изменения</button>
         </div>
 
+        <button type="button" class="theme-toggle" @click="toggleTheme">
+          <span class="theme-icon" aria-hidden="true">{{ theme === 'dark' ? '☾' : '☼' }}</span>
+          <span>{{ theme === 'dark' ? 'Темный вид' : 'Светлый вид' }}</span>
+        </button>
+
         <section class="filter-stack" aria-label="Фильтры">
+          <div class="filter-group-title">Что найти</div>
           <label>
             <span>Поиск</span>
             <input v-model.trim="filters.q" type="search" placeholder="объект, бюджет, получатель" @input="scheduleLoad" />
@@ -31,8 +37,10 @@
             <span>Код</span>
             <input v-model.trim="filters.code" type="search" placeholder="970, 6105, КЦСР" @input="scheduleLoad" />
           </label>
+
+          <div class="filter-group-title">Какие данные</div>
           <label>
-            <span>Шаблон</span>
+            <span>Набор</span>
             <select v-model="filters.template">
               <option v-for="template in templates" :key="template.code" :value="template.code">{{ template.label }}</option>
             </select>
@@ -52,6 +60,7 @@
             </select>
           </label>
 
+          <div class="filter-group-title">Период</div>
           <div v-if="mode === 'slice'" class="date-grid">
             <label>
               <span>С</span>
@@ -80,7 +89,7 @@
         </section>
 
         <section class="metric-box" aria-label="Метрики">
-          <div class="section-title">Метрики</div>
+          <div class="section-title">Какие суммы показать</div>
           <label v-for="metric in metrics" :key="metric.code" class="metric-check">
             <input type="checkbox" :value="metric.code" v-model="selectedMetrics" />
             <span>{{ metric.label }}</span>
@@ -88,16 +97,16 @@
         </section>
 
         <div class="side-actions">
-          <button type="button" class="ghost" @click="resetFilters">Сбросить</button>
-          <button type="button" class="primary" @click="exportCsv">Экспорт CSV</button>
+          <button type="button" class="ghost" @click="resetFilters">Очистить</button>
+          <button type="button" class="primary" @click="exportCsv">Скачать CSV</button>
         </div>
       </aside>
 
       <main class="main">
         <header class="topbar">
           <div>
-            <div class="eyebrow">MVP без БД · {{ activeTemplateLabel }}</div>
-            <h2>{{ mode === 'slice' ? 'Аналитический срез' : 'Сравнение периодов' }}</h2>
+            <div class="eyebrow">{{ activeTemplateLabel }}</div>
+            <h2>{{ mode === 'slice' ? 'Обзор данных' : 'Изменения по периодам' }}</h2>
           </div>
           <div class="status-strip">
             <span v-if="loading.meta || loading.query || loading.compare">Загрузка...</span>
@@ -123,7 +132,7 @@
           <article class="panel chart-panel">
             <div class="panel-head">
               <div>
-                <h3>Динамика</h3>
+                <h3>Изменения по датам</h3>
                 <p>{{ query.count || 0 }} записей в выборке</p>
               </div>
             </div>
@@ -133,8 +142,8 @@
           <article class="panel table-panel">
             <div class="panel-head">
               <div>
-                <h3>Сводная таблица</h3>
-                <p>{{ query.rows.length }} строк, сортировка по сумме выбранных метрик</p>
+                <h3>Итоги по объектам</h3>
+                <p>{{ query.rows.length }} строк в таблице</p>
               </div>
             </div>
             <div class="table-wrap">
@@ -173,8 +182,8 @@
         <section v-else class="panel table-panel">
           <div class="panel-head">
             <div>
-              <h3>Сравнение {{ filters.base }} → {{ filters.target }}</h3>
-              <p>{{ compare.rows.length }} строк, строго по snapshot выбранных дат</p>
+              <h3>Что изменилось: {{ filters.base }} → {{ filters.target }}</h3>
+              <p>{{ compare.rows.length }} строк в таблице</p>
             </div>
           </div>
           <div class="table-wrap">
@@ -224,8 +233,8 @@
         <section v-if="mode === 'slice'" class="panel table-panel detail-panel">
           <div class="panel-head">
             <div>
-              <h3>Детализация</h3>
-              <p>{{ query.details.length }} записей, trace доступен по каждой строке</p>
+              <h3>Исходные записи</h3>
+              <p>{{ query.details.length }} записей</p>
             </div>
           </div>
           <div class="table-wrap compact">
