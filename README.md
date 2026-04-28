@@ -14,6 +14,12 @@ python app.py 8000
 http://127.0.0.1:8000
 ```
 
+## Тесты
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
 ## Структура
 
 - `app.py` - локальный HTTP-сервер и ETL на стандартной библиотеке Python.
