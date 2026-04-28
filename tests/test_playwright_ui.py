@@ -100,6 +100,21 @@ class PlaywrightUiTests(unittest.TestCase):
         self.page.locator(".eyebrow", has_text="СКК").wait_for(timeout=10000)
         self.page.get_by_text("Короткий вывод").wait_for(timeout=10000)
 
+    def test_quick_start_resets_previous_assistant_search_scope(self):
+        self.page.get_by_placeholder("Например: покажи СКК по Благовещенску").nth(1).fill("СКК Благовещенск")
+        self.click_button("Понять запрос")
+        self.page.get_by_text("Я понял запрос").wait_for(timeout=10000)
+        self.click_button("Показать результат")
+        self.page.wait_for_url(lambda url: True, timeout=1000)
+        filtered_title = self.page.locator(".answer-card h3").inner_text()
+
+        self.click_button("Показать СКК")
+        self.page.wait_for_timeout(700)
+        full_title = self.page.locator(".answer-card h3").inner_text()
+
+        self.assertNotEqual(filtered_title, full_title)
+        self.assertIn("Найдено", full_title)
+
     def test_tabs_trace_readiness_empty_state_and_export(self):
         self.click_button("Показать СКК")
         self.click_button("Проверить перед показом")

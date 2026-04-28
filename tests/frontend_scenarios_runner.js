@@ -199,10 +199,18 @@ function makeInstance() {
   assert.deepEqual(vmApp.activeMetricCodes, ["limit", "obligation", "cash", "agreement", "contract", "payment", "buau"]);
 
   const quick = { mode: "slice", template: "skk", metrics: ["limit", "cash"], post_filter: "low_execution" };
+  vmApp.filters.q = "Благовещенск";
+  vmApp.filters.code = "6105";
+  vmApp.filters.budget = "Областной бюджет";
+  vmApp.filters.source = "РЧБ";
   vmApp.applyQuickAction(quick);
   assert.equal(vmApp.mode, "slice");
   assert.equal(vmApp.filters.template, "skk");
   assert.equal(vmApp.filters.post_filter, "low_execution");
+  assert.equal(vmApp.filters.q, "");
+  assert.equal(vmApp.filters.code, "");
+  assert.equal(vmApp.filters.budget, "");
+  assert.equal(vmApp.filters.source, "");
   assert.deepEqual(vmApp.selectedMetrics, ["limit", "cash"]);
   assert.equal(vmApp.currentView, "overview");
   assert.equal(vmApp.loadCalls, 1);

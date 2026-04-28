@@ -408,7 +408,15 @@ createApp({
 
     applyQuickAction(action) {
       const { code, ...cleanAction } = action;
-      this.applyAction(cleanAction);
+      this.applyAction({
+        reset_scope: true,
+        q: "",
+        code: "",
+        budget: "",
+        source: "",
+        post_filter: "",
+        ...cleanAction,
+      });
     },
 
     onSmartInput() {
