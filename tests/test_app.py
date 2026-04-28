@@ -216,6 +216,15 @@ class DataLoadTests(unittest.TestCase):
         self.assertTrue(payload["checks"])
         self.assertIn("summary", payload)
 
+    def test_as_of_timeline_uses_reporting_dates_and_matches_totals(self):
+        result = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"], "metrics": ["limit,cash"]})
+        dates = [point["date"] for point in result["timeline"]]
+        self.assertTrue(dates)
+        self.assertTrue(all(date in app.STORE.meta["reporting_dates"] for date in dates))
+        self.assertEqual(dates[-1], "2026-04-01")
+        self.assertEqual(result["timeline"][-1]["limit"], result["totals"]["limit"])
+        self.assertEqual(result["timeline"][-1]["cash"], result["totals"]["cash"])
+
     def test_empty_readiness_marks_empty_result(self):
         payload = app.readiness_response({"date": ["2026-04-01"], "template": ["skk"], "q": ["zzzz-no-data"]})
         empty = next(check for check in payload["checks"] if check["code"] == "empty_result")

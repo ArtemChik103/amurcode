@@ -1240,12 +1240,28 @@ def query_as_of(params: dict[str, list[str]]) -> dict:
     filtered = select_as_of(STORE.records, date, params)
     result = aggregate(filtered, metrics)
     result = apply_aggregate_post_filter(result, params.get("post_filter", [""])[0].strip(), metrics)
+    result["timeline"] = as_of_timeline(date, params, metrics)
     return {
         "view": "as_of",
         "date": date,
         "semantics": AS_OF_SEMANTICS,
         **result,
     }
+
+
+def as_of_timeline(date: str, params: dict[str, list[str]], metrics: list[str]) -> list[dict]:
+    post_filter = params.get("post_filter", [""])[0].strip()
+    dates = [item for item in STORE.meta.get("reporting_dates", []) if not date or item <= date]
+    points = []
+    for point_date in dates:
+        point_params = {**params, "date": [point_date]}
+        records = select_as_of(STORE.records, point_date, point_params)
+        result = aggregate(records, metrics)
+        result = apply_aggregate_post_filter(result, post_filter, metrics)
+        point = {"date": point_date}
+        point.update({metric: result["totals"].get(metric, 0.0) for metric in metrics})
+        points.append(point)
+    return points
 
 
 def readiness_response(params: dict[str, list[str]]) -> dict:
