@@ -791,6 +791,26 @@ label span,
   gap: 18px;
 }
 
+.workspace-grid .chart-panel {
+  min-height: 292px;
+}
+
+.workspace-grid .chart-panel:first-child {
+  min-height: 360px;
+}
+
+@media (min-width: 980px) {
+  .workspace-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .workspace-grid .chart-panel:first-child,
+  .workspace-grid .readiness-panel,
+  .workspace-grid .table-panel {
+    grid-column: 1 / -1;
+  }
+}
+
 .empty-state {
   padding: 20px;
   color: var(--muted);
@@ -835,7 +855,7 @@ label span,
 }
 
 .chart-panel {
-  padding-bottom: 12px;
+  padding-bottom: 8px;
 }
 
 canvas {
@@ -843,6 +863,11 @@ canvas {
   width: 100%;
   max-height: 300px;
   padding: 8px 14px 0;
+}
+
+.chart-panel canvas[height="210"] {
+  max-height: 230px;
+  padding-top: 4px;
 }
 
 .table-wrap {

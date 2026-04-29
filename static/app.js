@@ -936,12 +936,14 @@ createApp({
     },
 
     drawFunnelChart() {
-      const prepared = this.prepareCanvas(this.$refs.funnelChart, 230);
+      const prepared = this.prepareCanvas(this.$refs.funnelChart, 210);
       if (!prepared || this.mode !== "slice" || this.currentView !== "overview") return;
       const { ctx, width, height } = prepared;
       const styles = getComputedStyle(document.documentElement);
       const text = styles.getPropertyValue("--chart-text").trim() || "#63717b";
+      const grid = styles.getPropertyValue("--chart-grid").trim() || "#d9e0e4";
       const accent = styles.getPropertyValue("--accent").trim() || "#0f766e";
+      const blue = styles.getPropertyValue("--blue").trim() || "#2563eb";
       const warn = styles.getPropertyValue("--warn").trim() || "#d97706";
       const values = [
         ["План", Number(this.funnelValues.plan || 0)],
@@ -954,28 +956,46 @@ createApp({
         this.drawNoData(ctx, width, height);
         return;
       }
-      const left = 92;
-      const barHeight = 24;
-      const gap = 21;
-      const top = 24;
+      const colors = [accent, accent, warn, blue];
+      const left = 112;
+      const right = 28;
+      const top = 18;
+      const barHeight = 18;
+      const gap = 25;
+      const usable = Math.max(120, width - left - right);
+      ctx.strokeStyle = grid;
+      ctx.lineWidth = 1;
+      [0, 0.5, 1].forEach((tick) => {
+        const x = left + usable * tick;
+        ctx.beginPath();
+        ctx.moveTo(x, top - 6);
+        ctx.lineTo(x, top + values.length * (barHeight + gap) - gap + 9);
+        ctx.stroke();
+      });
       values.forEach(([label, value], index) => {
         const y = top + index * (barHeight + gap);
-        const barWidth = Math.max(3, (width - left - 28) * (value / max));
-        ctx.fillStyle = index < 2 ? accent : warn;
+        const barWidth = Math.max(value ? 4 : 0, usable * (value / max));
+        const percent = max ? Math.round((value / max) * 100) : 0;
+        ctx.fillStyle = "rgba(148, 163, 184, 0.16)";
+        ctx.fillRect(left, y, usable, barHeight);
+        ctx.fillStyle = colors[index];
         ctx.fillRect(left, y, barWidth, barHeight);
         ctx.fillStyle = text;
+        ctx.font = "600 12px Arial";
+        ctx.fillText(label, 14, y + 14);
         ctx.font = "12px Arial";
-        ctx.fillText(label, 12, y + 17);
-        ctx.fillText(this.formatMoney(value), left, y + barHeight + 15);
+        ctx.fillText(`${percent}%`, left + usable - 34, y + 14);
+        ctx.fillText(this.formatMoney(value), left, y + barHeight + 16);
       });
     },
 
     drawRiskChart() {
-      const prepared = this.prepareCanvas(this.$refs.riskChart, 230);
+      const prepared = this.prepareCanvas(this.$refs.riskChart, 210);
       if (!prepared || this.mode !== "slice" || this.currentView !== "overview") return;
       const { ctx, width, height } = prepared;
       const styles = getComputedStyle(document.documentElement);
       const text = styles.getPropertyValue("--chart-text").trim() || "#63717b";
+      const grid = styles.getPropertyValue("--chart-grid").trim() || "#d9e0e4";
       const colors = {
         critical: styles.getPropertyValue("--danger").trim() || "#dc2626",
         high: "#f97316",
@@ -994,27 +1014,35 @@ createApp({
         this.drawNoData(ctx, width, height);
         return;
       }
-      const cx = Math.min(width * 0.34, 110);
-      const cy = 92;
-      const radius = 58;
-      let start = -Math.PI / 2;
-      values.forEach(([key, , value]) => {
-        const angle = (value / total) * Math.PI * 2;
+      const left = 116;
+      const right = 34;
+      const top = 20;
+      const barHeight = 20;
+      const gap = 22;
+      const usable = Math.max(120, width - left - right);
+      const max = Math.max(...values.map((item) => item[2]), 1);
+      ctx.strokeStyle = grid;
+      ctx.lineWidth = 1;
+      [0, 0.5, 1].forEach((tick) => {
+        const x = left + usable * tick;
         ctx.beginPath();
-        ctx.moveTo(cx, cy);
-        ctx.arc(cx, cy, radius, start, start + angle);
-        ctx.closePath();
-        ctx.fillStyle = colors[key];
-        ctx.fill();
-        start += angle;
+        ctx.moveTo(x, top - 6);
+        ctx.lineTo(x, top + values.length * (barHeight + gap) - gap + 8);
+        ctx.stroke();
       });
       values.forEach(([key, label, value], index) => {
-        const y = 34 + index * 32;
+        const y = top + index * (barHeight + gap);
+        const barWidth = Math.max(value ? 4 : 0, usable * (value / max));
+        const percent = Math.round((value / total) * 100);
+        ctx.fillStyle = "rgba(148, 163, 184, 0.16)";
+        ctx.fillRect(left, y, usable, barHeight);
         ctx.fillStyle = colors[key];
-        ctx.fillRect(width * 0.58, y, 14, 14);
+        ctx.fillRect(left, y, barWidth, barHeight);
         ctx.fillStyle = text;
+        ctx.font = "600 12px Arial";
+        ctx.fillText(label, 14, y + 15);
         ctx.font = "12px Arial";
-        ctx.fillText(`${label}: ${value}`, width * 0.58 + 22, y + 12);
+        ctx.fillText(`${value} · ${percent}%`, left + Math.min(usable - 58, Math.max(barWidth + 8, 8)), y + 15);
       });
     },
 
