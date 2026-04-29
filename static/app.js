@@ -146,12 +146,14 @@ createApp({
       debounceTimer: null,
       chartRedraw: null,
       initialized: false,
+      loadRequestId: 0,
       pendingResultScroll: false,
       suppressAutoLoad: false,
       expandedPipelines: {},
       objectCard: null,
       objectRowsOpen: false,
       problemRiskFilter: "all",
+      riskHelpOpen: false,
     };
   },
 
@@ -291,6 +293,32 @@ createApp({
         acc[level] = (acc[level] || 0) + 1;
         return acc;
       }, { critical: 0, high: 0, medium: 0, low: 0 });
+    },
+
+    riskHelpSummary() {
+      const dist = this.riskDistribution;
+      const total = Object.values(dist).reduce((sum, value) => sum + Number(value || 0), 0);
+      return {
+        total,
+        critical: dist.critical || 0,
+        high: dist.high || 0,
+        medium: dist.medium || 0,
+        low: dist.low || 0,
+        rules: [
+          "Критичный: от 75",
+          "Высокий: от 50",
+          "Средний: от 25",
+          "Низкий: ниже 25",
+        ],
+        reasons: [
+          "нет кассы",
+          "нет оплат",
+          "нет документов",
+          "низкая касса",
+          "разрыв источников",
+          "крупный план",
+        ],
+      };
     },
 
     hasProblems() {
@@ -474,8 +502,9 @@ createApp({
 
     async loadData() {
       // В режиме среза основной результат и readiness идут одним набором параметров.
+      const requestId = ++this.loadRequestId;
       if (this.mode === "compare") {
-        await this.loadCompare();
+        await this.loadCompare(requestId);
         return;
       }
       this.loading.query = true;
@@ -486,6 +515,7 @@ createApp({
           fetchJson(`/api/query?${params.toString()}`),
           fetchJson(`/api/readiness?${params.toString()}`),
         ]);
+        if (requestId !== this.loadRequestId || this.mode !== "slice") return;
         this.query = query;
         this.readiness = readiness;
         await nextTick();
@@ -494,28 +524,32 @@ createApp({
         this.drawRiskChart();
         await this.scrollToResultsIfNeeded();
       } catch (error) {
+        if (requestId !== this.loadRequestId) return;
         console.error(error);
         this.error = "Не удалось загрузить данные. Проверьте параметры запроса.";
       } finally {
-        this.loading.query = false;
+        if (requestId === this.loadRequestId) this.loading.query = false;
       }
     },
 
-    async loadCompare() {
+    async loadCompare(requestId = ++this.loadRequestId) {
       this.loading.compare = true;
       this.error = "";
       try {
         const params = this.buildQueryParams(false);
         if (this.filters.base) params.set("base", this.filters.base);
         if (this.filters.target) params.set("target", this.filters.target);
-        this.compare = await fetchJson(`/api/compare?${params.toString()}`);
+        const compare = await fetchJson(`/api/compare?${params.toString()}`);
+        if (requestId !== this.loadRequestId || this.mode !== "compare") return;
+        this.compare = compare;
         await nextTick();
         await this.scrollToResultsIfNeeded();
       } catch (error) {
+        if (requestId !== this.loadRequestId) return;
         console.error(error);
         this.error = "Не удалось загрузить сравнение. Проверьте параметры запроса.";
       } finally {
-        this.loading.compare = false;
+        if (requestId === this.loadRequestId) this.loading.compare = false;
       }
     },
 
@@ -724,6 +758,10 @@ createApp({
       if (!action) return Promise.resolve();
       if (action.download === "excel") {
         this.exportExcel();
+        return Promise.resolve();
+      }
+      if (action.download === "pdf") {
+        this.exportPdf();
         return Promise.resolve();
       }
       if (action.open === "top_risk" && this.topRisks[0]) {
@@ -1124,6 +1162,18 @@ createApp({
         params.set("date", this.filters.date);
       }
       window.location.href = `/api/export.xlsx?${params.toString()}`;
+    },
+
+    exportPdf() {
+      const params = this.buildQueryParams(this.mode !== "compare");
+      if (this.mode === "compare") {
+        params.set("mode", "compare");
+        if (this.filters.base) params.set("base", this.filters.base);
+        if (this.filters.target) params.set("target", this.filters.target);
+      } else if (this.filters.date) {
+        params.set("date", this.filters.date);
+      }
+      window.location.href = `/api/export.pdf?${params.toString()}`;
     },
 
     exportCsv() {

@@ -102,6 +102,7 @@
         <div class="side-actions">
           <button type="button" class="ghost" @click="resetFilters">Очистить</button>
           <button type="button" class="primary" @click="exportExcel">Скачать Excel</button>
+          <button type="button" class="ghost" @click="exportPdf">Скачать PDF</button>
           <button type="button" class="ghost" @click="exportCsv">Скачать таблицу</button>
         </div>
       </aside>
@@ -204,6 +205,7 @@
           <strong>Демо-сценарий</strong>
           <span>1. Посмотрите вывод 2. Откройте главный риск 3. Покажите источник цифр 4. Скачайте Excel</span>
           <button type="button" class="ghost" @click="runFollowup({ open: 'top_risk' })">Открыть главный риск</button>
+          <button type="button" class="ghost" @click="exportPdf">Скачать PDF</button>
           <button type="button" class="ghost" @click="exportExcel">Скачать Excel</button>
         </section>
 
@@ -261,8 +263,21 @@
                 <h3>Риски</h3>
                 <p>Критичные · высокие · средние · низкие</p>
               </div>
+              <button type="button" class="ghost compact-button" @click="riskHelpOpen = !riskHelpOpen">
+                {{ riskHelpOpen ? 'Скрыть' : 'Как считается' }}
+              </button>
             </div>
             <canvas ref="riskChart" height="210"></canvas>
+            <div v-if="riskHelpOpen" class="risk-help">
+              <p>График показывает, сколько объектов попало в каждый уровень риска.</p>
+              <div class="risk-help-grid">
+                <span v-for="rule in riskHelpSummary.rules" :key="rule" class="risk-help-chip">{{ rule }}</span>
+              </div>
+              <div class="risk-help-grid">
+                <span v-for="reason in riskHelpSummary.reasons" :key="reason" class="risk-help-chip">{{ reason }}</span>
+              </div>
+              <p>Риск помогает выбрать, что проверить первым. Это не юридический вывод.</p>
+            </div>
           </article>
 
           <article v-if="readinessOpen" class="panel readiness-panel">

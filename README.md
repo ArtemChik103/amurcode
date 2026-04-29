@@ -56,14 +56,20 @@ UI использует `/api/query?view=as_of&date=...` и `/api/compare`. Ст
 
 - `GET /api/export.xlsx?date=&template=&q=&code=&budget=&source=&post_filter=`
 - `GET /api/export.xlsx?mode=compare&base=&target=&template=&q=&code=&budget=&source=`
+- `GET /api/export.pdf?date=&template=&q=&code=&budget=&source=&post_filter=`
+- `GET /api/export.pdf?mode=compare&base=&target=&template=&q=&code=&budget=&source=`
 
 Excel содержит листы `Выводы`, `Итоги`, `Объекты`, `Проблемы`, `Исходные строки`, `Методика`. Файл оформлен как отчет: заголовки, фильтры, закрепленные строки, подсветка рисков, денежные форматы, блоки внимания, главные риски и следующие действия. CSV-экспорт в UI сохранен как дополнительная таблица.
+
+PDF-экспорт доступен кнопкой `Скачать PDF` и теми же фильтрами, что Excel. Excel остается детальной рабочей таблицей для проверки строк, а PDF - коротким оформленным отчетом для показа или пересылки.
 
 Для новой машины:
 
 ```powershell
-python -m pip install openpyxl
+python -m pip install openpyxl reportlab
 ```
+
+Excel требует `openpyxl`, PDF требует `reportlab`. Если `reportlab` не установлен, `/api/export.pdf` вернет понятную JSON-ошибку `pdf_dependency_missing`; остальное приложение и Excel продолжают работать. Для корректной кириллицы в PDF лучше иметь системный TTF-шрифт Windows, например Arial, Calibri или Tahoma.
 
 ## Assistant
 
@@ -102,6 +108,8 @@ RUN_LLM_TESTS=0
 - `GET /api/readiness?view=as_of&date=&template=&q=&code=&budget=`
 - `GET /api/object?date=&template=&object_key=&budget=`
 - `GET /api/export.xlsx?date=&template=&q=&code=&budget=&source=&post_filter=`
+- `GET /api/export.pdf?date=&template=&q=&code=&budget=&source=&post_filter=`
+- `GET /api/export.pdf?mode=compare&base=&target=&template=&q=&code=&budget=&source=`
 - `GET /api/quality`
 - `GET /api/trace?id=`
 - `GET /api/catalog/dates`

@@ -964,7 +964,8 @@ def next_actions_payload(mode: str, has_top_risk: bool = False, has_problems: bo
         if has_problems:
             actions.append({"label": "Показать новые проблемы", "action": {"open_view": "changes"}})
         actions.append({"label": "Скачать Excel", "action": {"download": "excel"}})
-        return actions
+        actions.append({"label": "Скачать PDF", "action": {"download": "pdf"}})
+        return actions[:5]
     if has_problems:
         actions.extend(
             [
@@ -973,8 +974,10 @@ def next_actions_payload(mode: str, has_top_risk: bool = False, has_problems: bo
                 {"label": "Показать без документов", "action": {"post_filter": "no_documents"}},
             ]
         )
+    actions = actions[:3]
     actions.append({"label": "Скачать Excel", "action": {"download": "excel"}})
-    return actions
+    actions.append({"label": "Скачать PDF", "action": {"download": "pdf"}})
+    return actions[:5]
 
 
 def object_diagnosis(row: dict) -> dict:
@@ -2068,6 +2071,241 @@ def export_excel(params: dict[str, list[str]]) -> tuple[bytes, str]:
     return buffer.getvalue(), filename
 
 
+def format_money_pdf(value: object) -> str:
+    return f"{float(value or 0):,.0f}".replace(",", " ")
+
+
+def register_pdf_font() -> tuple[str, str]:
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    # Кириллица надежнее отображается с системным TTF; Helvetica остается fallback.
+    fonts = [
+        ("ArialPdf", "ArialPdfBold", "C:/Windows/Fonts/arial.ttf", "C:/Windows/Fonts/arialbd.ttf"),
+        ("CalibriPdf", "CalibriPdfBold", "C:/Windows/Fonts/calibri.ttf", "C:/Windows/Fonts/calibrib.ttf"),
+        ("TahomaPdf", "TahomaPdfBold", "C:/Windows/Fonts/tahoma.ttf", "C:/Windows/Fonts/tahomabd.ttf"),
+    ]
+    for regular_name, bold_name, regular_path, bold_path in fonts:
+        if not Path(regular_path).exists():
+            continue
+        try:
+            pdfmetrics.registerFont(TTFont(regular_name, regular_path))
+            if Path(bold_path).exists():
+                pdfmetrics.registerFont(TTFont(bold_name, bold_path))
+                return regular_name, bold_name
+            return regular_name, regular_name
+        except Exception:
+            continue
+    return "Helvetica", "Helvetica-Bold"
+
+
+def export_pdf(params: dict[str, list[str]]) -> tuple[bytes, str]:
+    """Формирует короткий презентационный PDF-отчет рядом с рабочим Excel."""
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.enums import TA_CENTER, TA_LEFT
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.lib.units import mm
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+    except ImportError as exc:
+        raise RuntimeError("pdf_dependency_missing") from exc
+
+    from html import escape
+
+    mode = params.get("mode", ["slice"])[0].strip()
+    template = params.get("template", ["all"])[0].strip() or "all"
+    template_label = TEMPLATES.get(template, TEMPLATES["all"])["label"]
+    if mode == "compare":
+        result = compare_periods(params)
+        rows = result["rows"]
+        summary = result["compare_insights"]
+        date_label = f"{result['base']} - {result['target']}"
+        metrics = selected_metrics(params)
+        totals = {metric: sum(float(row.get("metrics", {}).get(metric, {}).get("target") or 0) for row in rows) for metric in metrics}
+        change_items = (
+            list(summary.get("new_problem_objects") or [])
+            + list(summary.get("worsened_objects") or [])
+            + list(summary.get("stalled_cash_objects") or [])
+        )
+        filename = f"analytics_compare_{template}_{result['base']}_{result['target']}.pdf"
+    else:
+        result = query_as_of(params)
+        rows = result["rows"]
+        summary = result["attention_summary"]
+        date_label = result["date"]
+        totals = result["totals"]
+        change_items = []
+        filename = f"analytics_{template}_{params.get('date', ['as_of'])[0] or 'as_of'}.pdf"
+
+    regular_font, bold_font = register_pdf_font()
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle("PdfTitle", parent=styles["Title"], fontName=bold_font, fontSize=22, leading=26, textColor=colors.HexColor("#1F4E78"), alignment=TA_CENTER, spaceAfter=10))
+    styles.add(ParagraphStyle("PdfMeta", parent=styles["BodyText"], fontName=regular_font, fontSize=10, leading=14, alignment=TA_CENTER, textColor=colors.HexColor("#334155")))
+    styles.add(ParagraphStyle("PdfSection", parent=styles["Heading2"], fontName=bold_font, fontSize=13, leading=16, textColor=colors.HexColor("#1F4E78"), backColor=colors.HexColor("#D9EAF7"), borderPadding=6, spaceBefore=10, spaceAfter=8))
+    styles.add(ParagraphStyle("PdfBody", parent=styles["BodyText"], fontName=regular_font, fontSize=9, leading=12, textColor=colors.HexColor("#1f2937")))
+    styles.add(ParagraphStyle("PdfSmall", parent=styles["BodyText"], fontName=regular_font, fontSize=8, leading=10, textColor=colors.HexColor("#475569")))
+    styles.add(ParagraphStyle("PdfCell", parent=styles["BodyText"], fontName=regular_font, fontSize=7, leading=9, alignment=TA_LEFT))
+    styles.add(ParagraphStyle("PdfHeaderCell", parent=styles["BodyText"], fontName=bold_font, fontSize=7, leading=9, textColor=colors.white, alignment=TA_LEFT))
+
+    def p(text: object, style: str = "PdfBody") -> Paragraph:
+        return Paragraph(escape(str(text or "")), styles[style])
+
+    def short_cell(row: dict) -> str:
+        name = str(row.get("short_name") or row.get("object_name") or row.get("object_code") or "Объект без названия")
+        return name if len(name) <= 120 else f"{name[:117]}..."
+
+    def table(data: list[list[object]], widths: list[float] | None = None, risk_column: int | None = None) -> Table:
+        converted = [[p(cell, "PdfHeaderCell" if row_index == 0 else "PdfCell") for cell in row] for row_index, row in enumerate(data)]
+        result_table = Table(converted, colWidths=widths, repeatRows=1, hAlign="LEFT")
+        style = TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F4E78")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), bold_font),
+                ("FONTNAME", (0, 1), (-1, -1), regular_font),
+                ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#D9E0E4")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ]
+        )
+        if risk_column is not None:
+            fills = {"Критичный": "#F4CCCC", "Высокий": "#FCE4D6", "Средний": "#FFF2CC"}
+            for row_index, raw_row in enumerate(data[1:], start=1):
+                risk_text = str(raw_row[risk_column] if len(raw_row) > risk_column else "")
+                for label, fill in fills.items():
+                    if label in risk_text:
+                        style.add("BACKGROUND", (0, row_index), (-1, row_index), colors.HexColor(fill))
+                        break
+        result_table.setStyle(style)
+        return result_table
+
+    pipeline = row_pipeline(totals)
+    problem_count = sum(1 for row in rows if row.get("problem_reasons") or int(row.get("risk_score") or row.get("risk", {}).get("target") or 0) >= 25)
+    story = [
+        p("Аналитика расходов", "PdfTitle"),
+        p(f"Шаблон: {template_label}", "PdfMeta"),
+        p(f"Период/дата: {date_label}", "PdfMeta"),
+        p(f"Сформировано: {datetime.now().strftime('%Y-%m-%d %H:%M')}", "PdfMeta"),
+        Spacer(1, 5 * mm),
+        p("Что требует внимания", "PdfSection"),
+    ]
+    for bullet in (summary.get("bullets") or [])[:5]:
+        story.append(p(f"• {bullet}"))
+    story.extend(
+        [
+            p("Ключевые итоги", "PdfSection"),
+            table(
+                [
+                    ["Показатель", "Значение"],
+                    ["План", format_money_pdf(pipeline.get("plan"))],
+                    ["Документы", format_money_pdf(pipeline.get("documents"))],
+                    ["Оплачено", format_money_pdf(pipeline.get("paid"))],
+                    ["Касса", format_money_pdf(pipeline.get("cash"))],
+                    ["Проблемных объектов", problem_count],
+                ],
+                [55 * mm, 45 * mm],
+            ),
+        ]
+    )
+
+    risk_rows = [["Объект", "Код", "Бюджет", "Риск", "План", "Касса", "Причины"]]
+    if mode == "compare":
+        story.append(p("Главные изменения", "PdfSection"))
+        for item in change_items[:7]:
+            risk_rows.append(
+                [
+                    short_cell(item),
+                    item.get("object_code", ""),
+                    item.get("budget", ""),
+                    f"{item.get('risk_label', '')} {item.get('risk_score', '')}".strip(),
+                    format_money_pdf(item.get("plan")),
+                    format_money_pdf(item.get("cash")),
+                    ", ".join(item.get("reasons") or []),
+                ]
+            )
+    else:
+        story.append(p("Главные риски", "PdfSection"))
+        for item in (summary.get("top_risks") or [])[:7]:
+            risk_rows.append(
+                [
+                    short_cell(item),
+                    item.get("object_code", ""),
+                    item.get("budget", ""),
+                    f"{item.get('risk_label', '')} {item.get('risk_score', '')}".strip(),
+                    format_money_pdf(item.get("plan")),
+                    format_money_pdf(item.get("cash")),
+                    ", ".join(item.get("reasons") or []),
+                ]
+            )
+    if len(risk_rows) == 1:
+        risk_rows.append(["Нет данных", "", "", "", "", "", ""])
+    story.append(table(risk_rows, [62 * mm, 24 * mm, 42 * mm, 27 * mm, 28 * mm, 28 * mm, 58 * mm], risk_column=3))
+
+    actions = [item.get("label", "") for item in (summary.get("next_actions") or []) if item.get("label")]
+    if not actions:
+        actions = ["Открыть главный риск", "Проверить исходные строки", "Скачать Excel для детальной работы"]
+    story.append(p("Что делать дальше", "PdfSection"))
+    for action in actions[:5]:
+        story.append(p(f"• {action}"))
+
+    story.append(p("Методика", "PdfSection"))
+    for line in (
+        "План = лимиты + БО",
+        "Документы = соглашения + контракты",
+        "Оплачено = платежи + БУ/АУ",
+        "Касса = кассовое исполнение из РЧБ",
+        "Риск - управленческий индикатор для приоритизации проверки, не юридический вывод",
+        "Сравнение использует те же правила состояния на дату." if mode == "compare" else "",
+    ):
+        if line:
+            story.append(p(f"• {line}"))
+
+    story.extend([PageBreak(), p("Приложение: Топ объектов", "PdfSection")])
+    object_rows = [["Объект", "Код", "План", "Документы", "Оплачено", "Касса", "Риск"]]
+    for row in rows[:20]:
+        if mode == "compare":
+            metrics = row.get("metrics", {})
+            row_pipeline_data = {
+                "plan": float(metrics.get("limit", {}).get("target") or 0) + float(metrics.get("obligation", {}).get("target") or 0),
+                "documents": float(metrics.get("agreement", {}).get("target") or 0) + float(metrics.get("contract", {}).get("target") or 0),
+                "paid": float(metrics.get("payment", {}).get("target") or 0) + float(metrics.get("buau", {}).get("target") or 0),
+                "cash": float(metrics.get("cash", {}).get("target") or 0),
+            }
+            risk_text = str(row.get("risk", {}).get("target") or 0)
+        else:
+            row_pipeline_data = row.get("pipeline") or row_pipeline(row)
+            risk_text = f"{row.get('risk_label', '')} {row.get('risk_score', '')}".strip()
+        object_rows.append(
+            [
+                short_cell(row),
+                row.get("object_code", ""),
+                format_money_pdf(row_pipeline_data.get("plan")),
+                format_money_pdf(row_pipeline_data.get("documents")),
+                format_money_pdf(row_pipeline_data.get("paid")),
+                format_money_pdf(row_pipeline_data.get("cash")),
+                risk_text,
+            ]
+        )
+    story.append(table(object_rows, [76 * mm, 25 * mm, 28 * mm, 28 * mm, 28 * mm, 28 * mm, 32 * mm], risk_column=6))
+
+    def on_page(canvas, doc):
+        canvas.saveState()
+        canvas.setFont(regular_font, 8)
+        canvas.setFillColor(colors.HexColor("#64748B"))
+        canvas.drawString(doc.leftMargin, 9 * mm, "Аналитика расходов")
+        canvas.drawRightString(landscape(A4)[0] - doc.rightMargin, 9 * mm, f"стр. {doc.page}")
+        canvas.restoreState()
+
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), leftMargin=12 * mm, rightMargin=12 * mm, topMargin=12 * mm, bottomMargin=16 * mm)
+    doc.build(story, onFirstPage=on_page, onLaterPages=on_page)
+    return buffer.getvalue(), filename
+
+
 def compare_object_summary(row: dict, risk_value: int | None = None, base_row: dict | None = None) -> dict:
     pipeline = row.get("pipeline") or row_pipeline(row)
     score = int(risk_value if risk_value is not None else row.get("risk_score") or 0)
@@ -2271,6 +2509,16 @@ class Handler(SimpleHTTPRequestHandler):
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 filename,
             )
+            return
+        if parsed.path == "/api/export.pdf":
+            try:
+                body, filename = export_pdf(parse_qs(parsed.query))
+            except RuntimeError as exc:
+                if str(exc) == "pdf_dependency_missing":
+                    self.write_json({"error": "pdf_dependency_missing"}, status=500)
+                    return
+                raise
+            self.write_binary(body, "application/pdf", filename)
             return
         if parsed.path == "/api/quality":
             self.write_json({"issues": QUALITY_ISSUES, "summary": quality_summary(), "load_stats": LOAD_STATS})

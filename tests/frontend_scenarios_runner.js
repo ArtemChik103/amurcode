@@ -58,6 +58,7 @@ const context = {
   window: {
     devicePixelRatio: 1,
     onresize: null,
+    location: { href: "" },
   },
   getComputedStyle() {
     return {
@@ -265,6 +266,9 @@ function makeInstance() {
   assert.equal(vmApp.resultNextActions[0].label, "Скачать Excel");
   assert.equal(vmApp.funnelValues.plan, 120);
   assert.equal(vmApp.riskDistribution.low, 1);
+  assert.equal(vmApp.riskHelpOpen, false);
+  assert.equal(vmApp.riskHelpSummary.total, 1);
+  assert.equal(vmApp.riskHelpSummary.low, 1);
 
   scrollCalls = 0;
   await vmApp.applyQuickAction({ mode: "compare", template: "skk", metrics: ["limit"] });
@@ -386,6 +390,16 @@ function makeInstance() {
   vmApp.mode = "compare";
   vmApp.exportCsv();
   assert.match(emittedDownloads.at(-1).download, /analytics_compare_skk_2025-02-01_2026-04-01/);
+
+  vmApp.mode = "slice";
+  vmApp.filters.template = "skk";
+  vmApp.filters.date = "2026-04-01";
+  vmApp.exportPdf();
+  assert.match(context.window.location.href, /^\/api\/export\.pdf\?/);
+  assert.match(context.window.location.href, /template=skk/);
+  context.window.location.href = "";
+  await vmApp.runFollowup({ download: "pdf" });
+  assert.match(context.window.location.href, /^\/api\/export\.pdf\?/);
 
   vmApp.setMode("slice");
   assert.equal(vmApp.currentView, "overview");

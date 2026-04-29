@@ -218,6 +218,11 @@ class DataLoadTests(unittest.TestCase):
         self.assertTrue(actions)
         self.assertIn("Скачать Excel", [item["label"] for item in actions])
 
+    def test_next_actions_include_pdf_download(self):
+        result = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"]})
+        actions = [item["action"] for item in result["attention_summary"]["next_actions"]]
+        self.assertIn({"download": "pdf"}, actions)
+
     def test_top_risks_include_short_fields(self):
         result = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"], "post_filter": ["execution_problems"]})
         top = result["attention_summary"]["top_risks"][0]
@@ -232,6 +237,14 @@ class DataLoadTests(unittest.TestCase):
         self.assertIn("risk_level", row)
         self.assertIn("risk_label", row)
         self.assertIn("risk_explanation", row)
+
+    def test_risk_distribution_source_fields_stay_human_readable(self):
+        result = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"]})
+        row = result["rows"][0]
+        self.assertIsInstance(row.get("risk_label"), str)
+        self.assertIsInstance(row.get("risk_explanation"), list)
+        self.assertNotIn("problem_reasons", row["risk_label"])
+        self.assertNotIn("pipeline", " ".join(row["risk_explanation"]))
 
     def test_attention_summary_returns_human_bullets(self):
         result = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"]})
@@ -494,6 +507,15 @@ class HttpTests(unittest.TestCase):
         method_text = "\n".join(str(row[0] or "") for row in workbook["Методика"].iter_rows(values_only=True))
         self.assertIn("последний месячный срез", method_text)
 
+        try:
+            import reportlab  # noqa: F401
+        except ImportError:
+            return
+        status, content_type, body = self.request("/api/export.pdf?date=2026-04-01&template=skk")
+        self.assertEqual(status, 200)
+        self.assertIn("application/pdf", content_type)
+        self.assertTrue(body.startswith(b"%PDF"))
+
     def test_excel_export_has_formatting(self):
         content, _ = app.export_excel({"date": ["2026-04-01"], "template": ["skk"]})
         workbook = load_workbook(BytesIO(content))
@@ -505,6 +527,26 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(workbook["Итоги"]["A1"].font.color.rgb, "00FFFFFF")
         выводы = "\n".join(str(row[0] or "") for row in workbook["Выводы"].iter_rows(values_only=True))
         self.assertIn("Следующие действия", выводы)
+
+    def test_pdf_export_endpoint_or_function_returns_pdf(self):
+        try:
+            import reportlab  # noqa: F401
+        except ImportError:
+            self.skipTest("reportlab is not installed")
+        body, filename = app.export_pdf({"date": ["2026-04-01"], "template": ["skk"]})
+        self.assertTrue(body.startswith(b"%PDF"))
+        self.assertTrue(filename.endswith(".pdf"))
+        self.assertGreater(len(body), 1000)
+
+    def test_pdf_export_compare_returns_pdf(self):
+        try:
+            import reportlab  # noqa: F401
+        except ImportError:
+            self.skipTest("reportlab is not installed")
+        body, filename = app.export_pdf({"mode": ["compare"], "base": ["2025-02-01"], "target": ["2026-04-01"], "template": ["skk"]})
+        self.assertTrue(body.startswith(b"%PDF"))
+        self.assertTrue(filename.endswith(".pdf"))
+        self.assertGreater(len(body), 1000)
 
     def test_assistant_endpoint_returns_rule_based_json_without_groq(self):
         old_key = os.environ.pop("GROQ_API_KEY", None)
