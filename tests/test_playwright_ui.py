@@ -1,6 +1,7 @@
 import tempfile
 import threading
 import unittest
+import re
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -42,7 +43,7 @@ class PlaywrightUiTests(unittest.TestCase):
         self.page.on("pageerror", lambda error: self.fail(f"browser page error: {error}"))
         self.page.on("console", self._fail_on_console_error)
         self.page.goto(f"http://127.0.0.1:{self.port}/", wait_until="networkidle")
-        self.page.get_by_text("Быстрый старт").wait_for(timeout=15000)
+        self.page.get_by_text("Что нужно получить?").wait_for(timeout=15000)
 
     def tearDown(self):
         self.context.close()
@@ -52,7 +53,15 @@ class PlaywrightUiTests(unittest.TestCase):
             self.fail(f"browser console error: {message.text}")
 
     def click_button(self, name):
-        self.page.get_by_role("button", name=name).first.click()
+        exact = self.page.get_by_role("button", name=name, exact=True)
+        if exact.count():
+            exact.first.click()
+            return
+        if "/" in name:
+            self.page.get_by_role("button").filter(has_text=name).first.click()
+            return
+        pattern = re.compile(rf"^{re.escape(name)}(\s|$)")
+        self.page.get_by_role("button", name=pattern).first.click()
 
     def assert_in_viewport(self, locator):
         locator.wait_for(timeout=10000)
@@ -75,12 +84,12 @@ class PlaywrightUiTests(unittest.TestCase):
 
     def test_quick_actions_cover_all_scenarios(self):
         expectations = [
-            ("Показать СКК", "СКК"),
-            ("Показать КИК", "КИК"),
-            ("Показать 2/3", "2/3"),
-            ("Показать ОКВ", "ОКВ"),
-            ("Сравнить СКК", "Что изменилось:"),
-            ("Где проблемы с исполнением", "Короткий вывод"),
+            ("Собрать отчет СКК", "СКК"),
+            ("Собрать отчет КИК", "КИК"),
+            ("Собрать отчет 2/3", "2/3"),
+            ("Собрать отчет ОКВ", "ОКВ"),
+            ("Сравнить две даты", "Что изменилось:"),
+            ("Найти проблемные объекты", "Проблемы"),
         ]
         for button, expected_text in expectations:
             with self.subTest(button=button):
@@ -92,7 +101,7 @@ class PlaywrightUiTests(unittest.TestCase):
                 self.page.get_by_text("Короткий вывод").wait_for(timeout=10000)
 
     def test_smart_search_code_text_and_compare_enter_flow(self):
-        search = self.page.get_by_placeholder("Например: покажи СКК по Благовещенску").first
+        search = self.page.get_by_placeholder("Например: СКК Благовещенск без кассы на 01.04.2026").first
 
         search.fill("6105")
         self.page.get_by_text("Похоже, вы ищете СКК").wait_for(timeout=10000)
@@ -106,35 +115,35 @@ class PlaywrightUiTests(unittest.TestCase):
         self.page.get_by_text("Короткий вывод").wait_for(timeout=10000)
 
         search.fill("сравни СКК")
-        self.page.get_by_text("Сравнить периоды").wait_for(timeout=10000)
+        self.page.get_by_text("Показать изменения между первой и последней отчетной датой").wait_for(timeout=10000)
         search.press("Enter")
         self.page.get_by_text("Что изменилось:").wait_for(timeout=10000)
 
-    def test_assistant_rule_based_flow_and_alternative_action(self):
-        self.page.get_by_placeholder("Например: покажи СКК по Благовещенску").nth(1).fill("Покажи СКК")
-        self.click_button("Понять запрос")
+    def test_command_rule_based_flow(self):
+        search = self.page.get_by_placeholder("Например: СКК Благовещенск без кассы на 01.04.2026")
+        search.fill("Покажи СКК")
+        search.press("Enter")
         self.page.get_by_text("Я понял запрос").wait_for(timeout=10000)
-        self.page.get_by_text("Правила").wait_for(timeout=10000)
-        self.click_button("Показать результат")
+        self.page.get_by_text("Запрос разобран по правилам").wait_for(timeout=10000)
         self.page.locator(".eyebrow", has_text="СКК").wait_for(timeout=10000)
         self.page.get_by_text("Короткий вывод").wait_for(timeout=10000)
 
-    def test_assistant_result_scrolls_to_tabs(self):
-        self.page.get_by_placeholder("Например: покажи СКК по Благовещенску").nth(1).fill("СКК Благовещенск")
-        self.click_button("Понять запрос")
+    def test_command_result_scrolls_to_tabs(self):
+        search = self.page.get_by_placeholder("Например: СКК Благовещенск без кассы на 01.04.2026")
+        search.fill("СКК Благовещенск")
+        search.press("Enter")
         self.page.get_by_text("Я понял запрос").wait_for(timeout=10000)
-        self.click_button("Показать результат")
         self.assert_in_viewport(self.page.locator(".view-tabs"))
 
     def test_quick_start_scrolls_to_tabs_after_previous_search(self):
-        self.page.get_by_placeholder("Например: покажи СКК по Благовещенску").nth(1).fill("СКК Благовещенск")
-        self.click_button("Понять запрос")
+        search = self.page.get_by_placeholder("Например: СКК Благовещенск без кассы на 01.04.2026")
+        search.fill("СКК Благовещенск")
+        search.press("Enter")
         self.page.get_by_text("Я понял запрос").wait_for(timeout=10000)
-        self.click_button("Показать результат")
         self.assert_in_viewport(self.page.locator(".view-tabs"))
 
         self.page.evaluate("window.scrollTo(0, 0)")
-        self.click_button("Показать СКК")
+        self.click_button("Собрать отчет СКК")
         self.assert_in_viewport(self.page.locator(".view-tabs"))
 
     def test_empty_state_action_scrolls_to_tabs(self):
@@ -156,32 +165,69 @@ class PlaywrightUiTests(unittest.TestCase):
         self.assertLess(y, 250)
 
     def test_quick_start_resets_previous_assistant_search_scope(self):
-        self.page.get_by_placeholder("Например: покажи СКК по Благовещенску").nth(1).fill("СКК Благовещенск")
-        self.click_button("Понять запрос")
+        search = self.page.get_by_placeholder("Например: СКК Благовещенск без кассы на 01.04.2026")
+        search.fill("СКК Благовещенск")
+        search.press("Enter")
         self.page.get_by_text("Я понял запрос").wait_for(timeout=10000)
-        self.click_button("Показать результат")
         self.page.wait_for_url(lambda url: True, timeout=1000)
-        filtered_title = self.page.locator(".answer-card h3").inner_text()
+        filtered_summary = self.page.locator(".answer-card").inner_text()
 
-        self.click_button("Показать СКК")
+        self.click_button("Собрать отчет СКК")
         self.page.wait_for_timeout(700)
-        full_title = self.page.locator(".answer-card h3").inner_text()
+        full_summary = self.page.locator(".answer-card").inner_text()
 
-        self.assertNotEqual(filtered_title, full_title)
-        self.assertIn("Найдено", full_title)
+        self.assertNotEqual(filtered_summary, full_summary)
+        self.assertIn("Что требует внимания", full_summary)
+
+    def test_attention_summary_and_top_risks_are_visible(self):
+        self.click_button("Проблемные СКК")
+        self.page.get_by_text("Что требует внимания").wait_for(timeout=10000)
+        self.page.get_by_text("Главные риски").wait_for(timeout=10000)
+        body = self.page.locator("body").inner_text()
+        self.assertNotIn("problem_reasons", body)
+        self.assertNotIn("pipeline", body)
+
+    def test_problem_rows_show_risk(self):
+        self.click_button("Проблемные СКК")
+        self.click_button("Проблемы")
+        self.page.get_by_text(re.compile("Критичный|Высокий|Средний")).first.wait_for(timeout=10000)
+
+    def test_top_risk_opens_object_card(self):
+        self.click_button("Проблемные СКК")
+        self.page.locator(".top-risk-item").first.click()
+        self.page.get_by_role("heading", name="Документы").wait_for(timeout=10000)
+        self.page.get_by_text(re.compile("Критичный|Высокий|Средний|Низкий")).first.wait_for(timeout=10000)
+        self.page.get_by_text("План", exact=False).first.wait_for(timeout=10000)
+
+    def test_compare_insights_visible(self):
+        self.click_button("Сравнить две даты")
+        self.page.get_by_text("Что изменилось").first.wait_for(timeout=10000)
+        body = self.page.locator("body").inner_text()
+        self.assertNotIn("problem_reasons", body)
+        self.assertNotIn("pipeline", body)
 
     def test_tabs_trace_readiness_empty_state_and_export(self):
-        self.click_button("Показать СКК")
+        self.click_button("Собрать отчет СКК")
         self.click_button("Проверить перед показом")
-        self.page.get_by_text("Готовность демонстрации").wait_for(timeout=10000)
-        self.page.get_by_text("Данные загружены").wait_for(timeout=10000)
+        self.page.get_by_text("Готовность данных").wait_for(timeout=10000)
+        readiness = self.page.locator(".readiness-panel").inner_text()
+        self.assertIn("Плановые данные найдены", readiness)
+        self.assertNotIn("snapshot", readiness)
+        self.assertNotIn("trace", readiness)
+        self.assertNotIn("КЦСР", readiness)
 
-        self.click_button("Понятная таблица")
+        self.click_button("Объекты")
         self.page.get_by_text("Статус").wait_for(timeout=10000)
         self.page.locator(".status-pill").first.wait_for(timeout=10000)
+        self.page.locator(".simple-table button", has_text="Открыть").first.click()
+        self.page.get_by_text("Карточка объекта").or_(self.page.get_by_text("Документы")).first.wait_for(timeout=10000)
+        self.page.get_by_text("Откуда цифры").wait_for(timeout=10000)
+        self.page.get_by_role("button", name="×").click()
+        self.page.locator("button[title='Цепочка денег']").first.click()
+        self.page.get_by_text("План", exact=False).first.wait_for(timeout=10000)
 
-        self.click_button("Все суммы")
-        self.page.get_by_text("Все суммы по объектам").wait_for(timeout=10000)
+        self.click_button("Проблемы")
+        self.page.get_by_role("heading", name="Проблемы").wait_for(timeout=10000)
 
         self.click_button("Исходные строки")
         self.page.get_by_role("heading", name="Исходные строки").wait_for(timeout=10000)
@@ -208,11 +254,18 @@ class PlaywrightUiTests(unittest.TestCase):
         self.assertIn("Отчёт", content)
         self.assertIn("Показатели", content)
 
+        with self.page.expect_download() as excel_info:
+            self.click_button("Скачать Excel")
+        excel = excel_info.value
+        self.assertRegex(excel.suggested_filename, r"analytics_.*\.xlsx")
+
     def test_no_technical_words_on_primary_screen(self):
         body_text = self.page.locator("body").inner_text()
         self.assertNotIn("snapshot", body_text)
         self.assertNotIn("trace", body_text)
         self.assertNotIn("CSV", body_text)
+        self.assertNotIn("КЦСР", body_text)
+        self.assertNotIn("documentclass_id", body_text)
 
     def test_vue_runtime_loaded(self):
         try:

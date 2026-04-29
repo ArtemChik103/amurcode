@@ -1,10 +1,16 @@
 import json
+import os
+import tempfile
 import threading
 import unittest
+from io import BytesIO
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import quote
 
 import app
+from openpyxl import load_workbook
 
 
 class ParserTests(unittest.TestCase):
@@ -25,6 +31,14 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(app.normalize_code("08.3.02.97070"), "0830297070")
         self.assertEqual(app.normalize_code("13.2.01.97003"), "1320197003")
         self.assertEqual(app.normalize_code("101016105Б"), "101016105Б")
+
+    def test_find_header_value_matches_year_independent_prefix(self):
+        row = {"Лимиты ПБС 2026 год": "123"}
+        self.assertEqual(app.find_header_value(row, "Лимиты ПБС"), "123")
+
+    def test_object_group_key_uses_code_and_budget_or_normalized_name(self):
+        self.assertEqual(app.object_group_key({"object_code_norm": "001", "budget": "Областной бюджет"}), "001|областной бюджет")
+        self.assertEqual(app.object_group_key({"object_name": "  Объект, СКК! ", "budget": ""}), "name:объект скк|")
 
 
 class DataLoadTests(unittest.TestCase):
@@ -138,9 +152,137 @@ class DataLoadTests(unittest.TestCase):
             self.assertGreater(plan, 0)
             self.assertTrue(execution == 0 or execution / plan < 0.25)
 
+    def test_query_as_of_does_not_sum_monthly_rcb_snapshots(self):
+        records = [
+            {"source": "РЧБ", "record_kind": "rcb_snapshot", "snapshot": "2025-01-01", "object_code_norm": "1", "object_code": "1", "object_name": "obj", "budget": "", "limit": 10, "obligation": 0, "cash": 0, "agreement": 0, "contract": 0, "payment": 0, "buau": 0},
+            {"source": "РЧБ", "record_kind": "rcb_snapshot", "snapshot": "2025-02-01", "object_code_norm": "1", "object_code": "1", "object_name": "obj", "budget": "", "limit": 20, "obligation": 0, "cash": 0, "agreement": 0, "contract": 0, "payment": 0, "buau": 0},
+        ]
+        result = app.aggregate(app.select_as_of(records, "2025-02-15", {}))
+        self.assertEqual(result["totals"]["limit"], 20)
+
+    def test_rcb_2026_limit_and_obligation_columns_are_loaded(self):
+        result = app.query_as_of({"date": ["2026-04-01"], "template": ["all"]})
+        self.assertGreater(result["totals"]["limit"], 0)
+        self.assertGreater(result["totals"]["obligation"], 0)
+
+    def test_agreements_are_not_duplicated_across_monthly_snapshots(self):
+        records = [
+            {"source": "Соглашения", "record_kind": "agreement_snapshot", "snapshot": "2025-01-01", "document_id": "a1", "object_code_norm": "1", "object_code": "1", "object_name": "obj", "budget": "", "limit": 0, "obligation": 0, "cash": 0, "agreement": 50, "contract": 0, "payment": 0, "buau": 0},
+            {"source": "Соглашения", "record_kind": "agreement_snapshot", "snapshot": "2025-02-01", "document_id": "a1", "object_code_norm": "1", "object_code": "1", "object_name": "obj", "budget": "", "limit": 0, "obligation": 0, "cash": 0, "agreement": 60, "contract": 0, "payment": 0, "buau": 0},
+        ]
+        result = app.aggregate(app.select_as_of(records, "2025-02-15", {}))
+        self.assertEqual(result["totals"]["agreement"], 60)
+
+    def test_reporting_dates_exclude_payment_only_dates(self):
+        payload = app.reporting_dates_payload()
+        dates = [item["date"] for item in payload]
+        self.assertIn("2026-04-01", dates)
+        self.assertNotIn("2026-04-02", dates)
+
+    def test_compare_uses_as_of_semantics(self):
+        result = app.compare_periods({"base": ["2025-02-01"], "target": ["2026-04-01"], "template": ["skk"], "metrics": ["limit,cash"]})
+        self.assertEqual(result["view"], "as_of")
+        self.assertEqual(result["available_dates"], app.STORE.meta["reporting_dates"])
+        self.assertTrue(result["rows"])
+
+    def test_problem_filters_no_cash_no_payments_no_documents(self):
+        records = [
+            {"source": "РЧБ", "record_kind": "rcb_snapshot", "snapshot": "2026-04-01", "object_code_norm": "1", "object_code": "1", "object_name": "no cash", "budget": "", "limit": 100, "obligation": 0, "cash": 0, "agreement": 10, "contract": 0, "payment": 1, "buau": 0},
+            {"source": "РЧБ", "record_kind": "rcb_snapshot", "snapshot": "2026-04-01", "object_code_norm": "2", "object_code": "2", "object_name": "no docs", "budget": "", "limit": 100, "obligation": 0, "cash": 1, "agreement": 0, "contract": 0, "payment": 0, "buau": 0},
+            {"source": "Соглашения", "record_kind": "agreement_snapshot", "snapshot": "2026-04-01", "object_code_norm": "3", "object_code": "3", "object_name": "no pay", "budget": "", "limit": 0, "obligation": 0, "cash": 0, "agreement": 10, "contract": 0, "payment": 0, "buau": 0},
+        ]
+        result = app.aggregate(records)
+        self.assertEqual(len(app.apply_aggregate_post_filter(result, "no_cash", app.METRIC_KEYS)["rows"]), 1)
+        self.assertEqual(len(app.apply_aggregate_post_filter(result, "no_documents", app.METRIC_KEYS)["rows"]), 1)
+        self.assertEqual(len(app.apply_aggregate_post_filter(result, "no_payments", app.METRIC_KEYS)["rows"]), 1)
+
+    def test_pipeline_fields_are_returned_for_rows(self):
+        result = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"]})
+        row = result["rows"][0]
+        self.assertIn("pipeline", row)
+        self.assertIn("plan", row["pipeline"])
+        self.assertIn("problem_reasons", row)
+        self.assertIn("object_key", row)
+        self.assertIn("match_confidence", row)
+
+    def test_risk_score_and_level_are_added_to_rows(self):
+        result = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"]})
+        row = result["rows"][0]
+        self.assertIn("risk_score", row)
+        self.assertIn("risk_level", row)
+        self.assertIn("risk_label", row)
+        self.assertIn("risk_explanation", row)
+
+    def test_attention_summary_returns_human_bullets(self):
+        result = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"]})
+        summary = result["attention_summary"]
+        self.assertEqual(summary["title"], "Что требует внимания")
+        self.assertTrue(summary["bullets"])
+        text = " ".join(summary["bullets"])
+        self.assertNotIn("problem_reasons", text)
+        self.assertNotIn("pipeline", text)
+
+    def test_problem_rows_are_sorted_by_risk(self):
+        result = app.query_as_of({
+            "date": ["2026-04-01"],
+            "template": ["skk"],
+            "post_filter": ["execution_problems"],
+        })
+        scores = [row["risk_score"] for row in result["rows"]]
+        self.assertEqual(scores, sorted(scores, reverse=True))
+
+    def test_compare_insights_are_returned(self):
+        result = app.compare_periods({
+            "base": ["2025-02-01"],
+            "target": ["2026-04-01"],
+            "template": ["skk"],
+        })
+        self.assertIn("compare_insights", result)
+        self.assertIn("bullets", result["compare_insights"])
+
+    def test_object_detail_returns_first_query_row(self):
+        result = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"]})
+        row = result["rows"][0]
+        payload = app.object_detail({"date": ["2026-04-01"], "template": ["skk"], "object_key": [row["object_key"]]})
+        self.assertEqual(payload["object_key"], row["object_key"])
+        self.assertIn("pipeline", payload)
+        self.assertIn("documents", payload)
+
+    def test_object_detail_includes_risk(self):
+        query = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"]})
+        key = query["rows"][0]["object_key"]
+        detail = app.object_detail({"date": ["2026-04-01"], "template": ["skk"], "object_key": [key]})
+        self.assertIn("risk_score", detail)
+        self.assertIn("risk_label", detail)
+
+    def test_readiness_summary_returns_checks(self):
+        payload = app.readiness_response({"date": ["2026-04-01"], "template": ["skk"]})
+        self.assertEqual(payload["date"], "2026-04-01")
+        self.assertTrue(payload["checks"])
+        self.assertIn("summary", payload)
+
+    def test_as_of_timeline_uses_reporting_dates_and_matches_totals(self):
+        result = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"], "metrics": ["limit,cash"]})
+        dates = [point["date"] for point in result["timeline"]]
+        self.assertTrue(dates)
+        self.assertTrue(all(date in app.STORE.meta["reporting_dates"] for date in dates))
+        self.assertEqual(dates[-1], "2026-04-01")
+        self.assertEqual(result["timeline"][-1]["limit"], result["totals"]["limit"])
+        self.assertEqual(result["timeline"][-1]["cash"], result["totals"]["cash"])
+
+    def test_empty_readiness_marks_empty_result(self):
+        payload = app.readiness_response({"date": ["2026-04-01"], "template": ["skk"], "q": ["zzzz-no-data"]})
+        empty = next(check for check in payload["checks"] if check["code"] == "empty_result")
+        self.assertIn(empty["status"], {"warn", "bad"})
+
+    def test_quick_actions_use_as_of_date(self):
+        self.assertEqual(app.QUICK_ACTIONS["execution_problems"]["post_filter"], "execution_problems")
+        self.assertEqual(app.default_date_range()[1], app.STORE.meta["reporting_dates"][-1])
+
     def test_assistant_rule_based_core_intents(self):
         skk = app.assistant_rule_based("Покажи СКК", {})
         self.assertEqual(skk["action"]["template"], "skk")
+        self.assertIn("followups", skk)
         self.assertEqual(skk["alternatives"][0]["label"], "Показать все данные")
         self.assertEqual(skk["alternatives"][0]["action"]["q"], "")
 
@@ -159,6 +301,68 @@ class DataLoadTests(unittest.TestCase):
 
         explain = app.assistant_rule_based("что такое БО", {})
         self.assertEqual(explain["intent"], "explain_metric")
+
+    def test_env_loader_reads_local_env_file(self):
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
+            handle.write("CODEX_TEST_ENV_LOADER='ok'\n")
+            path = Path(handle.name)
+        try:
+            os.environ.pop("CODEX_TEST_ENV_LOADER", None)
+            app.load_local_env(path)
+            self.assertEqual(os.environ.get("CODEX_TEST_ENV_LOADER"), "ok")
+        finally:
+            os.environ.pop("CODEX_TEST_ENV_LOADER", None)
+            path.unlink(missing_ok=True)
+
+    def test_env_loader_missing_file_is_noop(self):
+        app.load_local_env(app.ROOT / "missing-test-env-file")
+
+    def test_validate_assistant_action_rejects_unknown_fields(self):
+        fallback = app.assistant_rule_based("Покажи СКК", {})["action"]
+        action = app.validate_assistant_action(
+            {
+                "mode": "slice",
+                "template": "skk",
+                "date": "2026-04-01",
+                "post_filter": "no_cash",
+                "endpoint": "/api/trace",
+                "q": "x" * 250,
+            },
+            fallback,
+        )
+        self.assertNotIn("endpoint", action)
+        self.assertEqual(action["q"], "x" * 200)
+        self.assertEqual(action["post_filter"], "no_cash")
+
+    def test_assistant_schema_contains_only_allowed_actions(self):
+        schema = app.assistant_json_schema()
+        action_properties = schema["properties"]["action"]["properties"]
+        self.assertEqual(set(action_properties), app.ASSISTANT_ACTION_FIELDS)
+        self.assertNotIn("endpoint", action_properties)
+
+    def test_assistant_complex_problem_query_maps_to_problem_filter(self):
+        old_key = os.environ.pop("GROQ_API_KEY", None)
+        self.addCleanup(lambda: os.environ.__setitem__("GROQ_API_KEY", old_key) if old_key is not None else os.environ.pop("GROQ_API_KEY", None))
+        payload = app.assistant_response("покажи проблемные СКК без кассы", {"mode": "slice", "template": "all"})
+        self.assertEqual(payload["action"]["template"], "skk")
+        self.assertIn(payload["action"]["post_filter"], {"execution_problems", "no_cash"})
+        self.assertEqual(payload["action"]["open_view"], "problems")
+
+    def test_malformed_llm_response_falls_back_rule_based(self):
+        old_key = os.environ.get("GROQ_API_KEY")
+        original = app.assistant_llm
+        os.environ["GROQ_API_KEY"] = "test-key"
+        app.assistant_llm = lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("bad llm"))
+        try:
+            payload = app.assistant_response("Покажи СКК", {})
+            self.assertEqual(payload["mode"], "rule_based")
+            self.assertEqual(payload["action"]["template"], "skk")
+        finally:
+            app.assistant_llm = original
+            if old_key is None:
+                os.environ.pop("GROQ_API_KEY", None)
+            else:
+                os.environ["GROQ_API_KEY"] = old_key
 
     def test_rag_loader_reads_markdown_documents(self):
         documents = app.load_rag_documents()
@@ -229,6 +433,7 @@ class HttpTests(unittest.TestCase):
             "/api/catalog/budgets",
             "/api/catalog/objects?q=6105",
             "/api/quality",
+            "/api/readiness?view=as_of&date=2026-04-01&template=skk",
             "/api/compare?base=2025-02-01&target=2026-04-01&template=skk&metrics=limit,cash",
         ):
             status, content_type, body = self.request(path)
@@ -244,7 +449,27 @@ class HttpTests(unittest.TestCase):
         self.assertIn("raw", payload)
         self.assertIn("human_summary", payload)
 
+    def test_object_and_excel_export_endpoints(self):
+        query = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"]})
+        object_key = query["rows"][0]["object_key"]
+        status, content_type, body = self.request(f"/api/object?date=2026-04-01&template=skk&object_key={quote(object_key)}")
+        self.assertEqual(status, 200)
+        self.assertIn("application/json", content_type)
+        payload = json.loads(body.decode("utf-8"))
+        self.assertEqual(payload["object_key"], object_key)
+
+        status, content_type, body = self.request("/api/export.xlsx?date=2026-04-01&template=skk")
+        self.assertEqual(status, 200)
+        self.assertIn("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", content_type)
+        workbook = load_workbook(BytesIO(body), read_only=True)
+        self.assertEqual(workbook.sheetnames, ["Выводы", "Итоги", "Объекты", "Проблемы", "Исходные строки", "Методика"])
+        self.assertIn("Выводы", workbook.sheetnames)
+        method_text = "\n".join(str(row[0] or "") for row in workbook["Методика"].iter_rows(values_only=True))
+        self.assertIn("последний месячный срез", method_text)
+
     def test_assistant_endpoint_returns_rule_based_json_without_groq(self):
+        old_key = os.environ.pop("GROQ_API_KEY", None)
+        self.addCleanup(lambda: os.environ.__setitem__("GROQ_API_KEY", old_key) if old_key is not None else os.environ.pop("GROQ_API_KEY", None))
         status, content_type, body = self.request(
             "/api/assistant",
             method="POST",
@@ -253,8 +478,22 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("application/json", content_type)
         payload = json.loads(body.decode("utf-8"))
-        self.assertIn(payload["mode"], {"rule_based", "llm"})
+        self.assertEqual(payload["mode"], "rule_based")
         self.assertEqual(payload["action"]["template"], "skk")
+
+    def test_explain_endpoint_returns_rule_based_without_groq(self):
+        old_key = os.environ.pop("GROQ_API_KEY", None)
+        self.addCleanup(lambda: os.environ.__setitem__("GROQ_API_KEY", old_key) if old_key is not None else os.environ.pop("GROQ_API_KEY", None))
+        status, content_type, body = self.request(
+            "/api/explain",
+            method="POST",
+            payload={"kind": "query", "payload": {"attention_summary": {"bullets": ["Главная проблема - нет кассы."]}}},
+        )
+        self.assertEqual(status, 200)
+        self.assertIn("application/json", content_type)
+        payload = json.loads(body.decode("utf-8"))
+        self.assertEqual(payload["mode"], "rule_based")
+        self.assertTrue(payload["bullets"])
 
     def test_quick_actions_run_against_public_api(self):
         status, _, body = self.request("/api/catalog/quick-actions")
@@ -280,6 +519,11 @@ class HttpTests(unittest.TestCase):
 
 
 class StaticFilesTests(unittest.TestCase):
+    def test_gitignore_mentions_env(self):
+        gitignore = (app.ROOT / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn(".env", gitignore)
+        self.assertIn("!.env.example", gitignore)
+
     def test_frontend_assets_exist_and_reference_api(self):
         index = (app.STATIC_DIR / "index.html").read_text(encoding="utf-8")
         script = (app.STATIC_DIR / "app.js").read_text(encoding="utf-8")
@@ -290,8 +534,12 @@ class StaticFilesTests(unittest.TestCase):
         self.assertIn("/api/query", script)
         self.assertIn("/api/compare", script)
         self.assertIn("/api/trace", script)
+        self.assertIn("/api/readiness", script)
+        self.assertIn("/api/object", script)
+        self.assertIn("/api/export.xlsx", script)
         self.assertIn("/api/catalog/quick-actions", script)
         self.assertIn("/api/assistant", script)
+        self.assertIn("/api/explain", script)
         self.assertIn("grid-template-columns", styles)
 
     def test_vue_frontend_is_declarative(self):
@@ -309,24 +557,27 @@ class StaticFilesTests(unittest.TestCase):
             "loadCompare",
             "openTrace",
             "exportCsv",
+            "exportExcel",
+            "openObject",
             "quickActions",
-            "smartInput",
-            "assistant",
+            "command",
             "applyQuickAction",
-            "buildSmartSuggestions",
-            "askAssistant",
-            "applyAssistantAction",
+            "buildCommandSuggestions",
+            "runCommand",
+            "explainResult",
             "resultNarrative",
             "simpleRows",
+            "problemRows",
         ):
             self.assertIn(marker, script)
         for marker in (
-            "Быстрый старт",
-            "Спросить помощника",
+            "Напишите, что нужно получить",
             "Короткий вывод",
-            "Понятная таблица",
+            "Объекты",
+            "Проблемы",
         ):
             self.assertIn(marker, index)
+        self.assertNotIn("Спросить помощника", index)
         for legacy_marker in (
             "document.querySelector",
             "innerHTML =",

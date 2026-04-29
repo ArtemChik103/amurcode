@@ -13,10 +13,12 @@ const METRIC_LABELS = {
   buau: "БУ/АУ",
 };
 
+// CSV экспорт делается на клиенте, поэтому значения экранируются до сборки строк.
 function csvCell(value) {
   return `"${String(value ?? "").replaceAll('"', '""')}"`;
 }
 
+// Общий debounce для поиска и перерисовки графика, чтобы не спамить API.
 function debounce(fn, delay = 250) {
   let timer;
   return (...args) => {
@@ -36,12 +38,18 @@ async function fetchJson(url, options) {
 createApp({
   data() {
     return {
+      // Режимы соответствуют двум backend-сценариям: as-of срез и сравнение дат.
       mode: "slice",
       theme: "dark",
       currentView: "overview",
-      smartInput: "",
-      smartSuggestions: [],
-      selectedSuggestion: null,
+      command: {
+        text: "",
+        loading: false,
+        response: null,
+        suggestions: [],
+        source: "",
+        error: "",
+      },
       quickActions: [],
       readinessOpen: false,
       advancedOpen: false,
@@ -58,6 +66,7 @@ createApp({
         budgets: [],
         sources: [],
         snapshots: [],
+        reporting_dates: [],
         objects: [],
       },
 
@@ -73,11 +82,14 @@ createApp({
       },
 
       filters: {
+        // Все фильтры хранятся плоско, чтобы их можно было напрямую превратить
+        // в URLSearchParams и переиспользовать в быстрых действиях.
         q: "",
         code: "",
         template: "all",
         budget: "",
         source: "",
+        date: "",
         start: "",
         end: "",
         base: "",
@@ -93,6 +105,13 @@ createApp({
         details: [],
         timeline: [],
         count: 0,
+      },
+
+      readiness: {
+        date: "",
+        template: "",
+        summary: { ok: 0, warn: 0, bad: 0 },
+        checks: [],
       },
 
       compare: {
@@ -117,18 +136,26 @@ createApp({
         query: false,
         compare: false,
         trace: false,
+        object: false,
+        explain: false,
       },
 
       error: "",
+      explanation: null,
       debounceTimer: null,
       chartRedraw: null,
       initialized: false,
       pendingResultScroll: false,
       suppressAutoLoad: false,
+      expandedPipelines: {},
+      objectCard: null,
+      objectRowsOpen: false,
+      problemRiskFilter: "all",
     };
   },
 
   computed: {
+    // Computed-свойства приводят API-ответы к форме, удобной для шаблона.
     activeTemplateLabel() {
       const readable = {
         all: "Все данные",
@@ -170,33 +197,91 @@ createApp({
       }
       return [
         { code: "overview", label: "Главное", count: this.query.count || 0 },
-        { code: "simple", label: "Понятная таблица", count: this.simpleRows.length },
-        { code: "summary", label: "Все суммы", count: this.query.rows.length },
+        { code: "objects", label: "Объекты", count: this.simpleRows.length },
+        { code: "problems", label: "Проблемы", count: this.problemRows.length },
         { code: "records", label: "Исходные строки", count: this.query.details.length },
       ];
     },
 
     simpleRows() {
+      // Backend уже возвращает pipeline и риск, но UI пересчитывает fallback
+      // для старых ответов и тестовых данных.
       return (this.query.rows || []).map((row) => {
-        const plan = Number(row.limit || 0) + Number(row.obligation || 0);
-        const execution = Number(row.cash || 0) + Number(row.payment || 0) + Number(row.buau || 0);
-        const documents = Number(row.agreement || 0) + Number(row.contract || 0);
+        const pipeline = row.pipeline || this.buildPipeline(row);
         const status = this.rowStatus(row);
+        const key = row.object_key || `${row.object_code || row.object_name}-${row.budget || ""}`;
         return {
-          object_code: row.object_code,
-          object_name: row.object_name,
-          budget: row.budget,
-          plan,
-          execution,
-          documents,
+          ...row,
+          rowKey: key,
+          plan: pipeline.plan,
+          paid: pipeline.paid,
+          cash: pipeline.cash,
+          documents: pipeline.documents,
+          pipeline,
           status,
           statusLabel: this.rowStatusLabel(status),
           statusClass: this.rowStatusClass(status),
+          riskLabel: row.risk_label || this.riskLabel(row.risk_level),
+          riskScore: Number(row.risk_score || 0),
+          riskClass: this.riskClass(row.risk_level),
         };
       });
     },
 
+    problemRows() {
+      return this.simpleRows
+        .filter((row) => (row.problem_reasons || []).length)
+        .filter((row) => {
+          if (this.problemRiskFilter === "critical") return row.risk_level === "critical";
+          if (this.problemRiskFilter === "high") return ["critical", "high"].includes(row.risk_level);
+          return true;
+        })
+        .sort((left, right) => (Number(right.risk_score || 0) - Number(left.risk_score || 0)) || (Number(right.plan || 0) - Number(left.plan || 0)));
+    },
+
+    problemGroups() {
+      const groups = {};
+      this.problemRows.forEach((row) => {
+        (row.problem_reasons || ["data_gap"]).forEach((reason) => {
+          if (!groups[reason]) groups[reason] = { reason, label: this.problemReasonLabel(reason), rows: [] };
+          groups[reason].rows.push(row);
+        });
+      });
+      return Object.values(groups).map((group) => ({
+        ...group,
+        rows: group.rows.sort((left, right) => (Number(right.risk_score || 0) - Number(left.risk_score || 0)) || (Number(right.plan || 0) - Number(left.plan || 0))),
+      }));
+    },
+
+    topRisks() {
+      return this.query.attention_summary?.top_risks || [];
+    },
+
+    reportingDates() {
+      const dates = this.meta.reporting_dates?.length ? this.meta.reporting_dates : this.meta.snapshots.map((date) => ({ date, label: date }));
+      return dates;
+    },
+
+    currentDateLabel() {
+      return this.reportingDates.find((item) => item.date === this.filters.date)?.label || this.filters.date;
+    },
+
+    activeDateValues() {
+      return this.reportingDates.map((item) => item.date);
+    },
+
+    simpleTotals() {
+      const totals = this.query.totals || {};
+      return this.buildPipeline(totals);
+    },
+
+    hasProblems() {
+      return this.problemRows.length > 0;
+    },
+
     resultNarrative() {
+      // Короткий вывод сначала берет готовый attention_summary с backend,
+      // а при его отсутствии строит простой текст из текущей таблицы.
       if (this.mode === "compare") {
         return this.compareNarrative;
       }
@@ -207,30 +292,32 @@ createApp({
           severity: "empty",
         };
       }
-      const totals = this.query.totals || {};
-      const totalSelected = this.activeMetricCodes.reduce((sum, metric) => sum + Number(totals[metric] || 0), 0);
-      const topRow = this.query.rows[0];
-      const cashLike = Number(totals.cash || 0) + Number(totals.payment || 0) + Number(totals.buau || 0);
-      const planLike = Number(totals.limit || 0) + Number(totals.obligation || 0);
-      const sources = new Set();
-      this.query.rows.forEach((row) => String(row.sources || "").split(",").forEach((source) => source.trim() && sources.add(source.trim())));
-      const bullets = [
-        `Всего по выбранным показателям: ${this.formatMoney(totalSelected)}`,
-        `Крупнейшая строка: ${topRow.object_name || topRow.object_code || "без названия"}`,
-        `Есть данные из источников: ${sources.size || 0}`,
-      ];
-      let severity = "normal";
-      if (planLike > 0 && cashLike === 0) {
-        bullets.push("Есть плановые суммы, но нет исполнения.");
-        severity = "warning";
-      } else if (Number(totals.limit || 0) > cashLike * 2 && cashLike > 0) {
-        bullets.push("Кассовое исполнение заметно ниже лимитов.");
-        severity = "warning";
+      if (this.query.attention_summary) {
+        return {
+          title: this.query.attention_summary.title,
+          bullets: this.query.attention_summary.bullets || [],
+          severity: this.query.attention_summary.severity || "normal",
+        };
       }
-      return { title: `Найдено объектов: ${this.query.rows.length}`, bullets, severity };
+      const totals = this.query.totals || {};
+      const topRow = this.query.rows[0];
+      const pipeline = this.simpleTotals;
+      const bullets = [
+        `План: ${this.formatMoney(pipeline.plan)}, касса: ${this.formatMoney(pipeline.cash)}.`,
+        this.hasProblems ? `Есть ${this.problemRows.length} объектов с проблемами исполнения.` : "Явных проблем исполнения не найдено.",
+        `Самый крупный объект: ${topRow.object_name || topRow.object_code || "без названия"}.`,
+      ];
+      return { title: `На ${this.currentDateLabel || this.filters.date} найдено ${this.query.rows.length} объектов.`, bullets, severity: this.hasProblems ? "warning" : "normal" };
     },
 
     compareNarrative() {
+      if (this.compare.compare_insights) {
+        return {
+          title: this.compare.compare_insights.title,
+          bullets: this.compare.compare_insights.bullets || [],
+          severity: this.compare.compare_insights.severity || "normal",
+        };
+      }
       if (!this.compare.rows.length) {
         return {
           title: "Изменений не найдено",
@@ -248,6 +335,16 @@ createApp({
       return { title: `Изменения за период ${this.filters.base} - ${this.filters.target}`, bullets, severity: "normal" };
     },
 
+    compareInsightSections() {
+      const insights = this.compare.compare_insights || {};
+      return [
+        { code: "new_problem_objects", title: "Новые проблемы", rows: insights.new_problem_objects || [] },
+        { code: "improved_objects", title: "Риск снизился", rows: insights.improved_objects || [] },
+        { code: "worsened_objects", title: "Риск вырос", rows: insights.worsened_objects || [] },
+        { code: "stalled_cash_objects", title: "План вырос, касса не изменилась", rows: insights.stalled_cash_objects || [] },
+      ].filter((section) => section.rows.length);
+    },
+
     emptyStateSuggestions() {
       const result = [];
       if (this.filters.budget) result.push({ label: "Убрать бюджет", patch: { budget: "" } });
@@ -256,28 +353,21 @@ createApp({
         result.push({ label: "Искать во всех данных", patch: { template: "all", budget: "", source: "", code: "", post_filter: "" } });
       }
       if (this.filters.q || this.filters.code) result.push({ label: "Очистить поиск", patch: { q: "", code: "" } });
-      if (this.filters.start !== this.meta.snapshots[0] || this.filters.end !== this.meta.snapshots[this.meta.snapshots.length - 1]) {
-        result.push({ label: "Показать весь доступный период", patch: { start: this.meta.snapshots[0] || "", end: this.meta.snapshots[this.meta.snapshots.length - 1] || "" } });
+      if (this.filters.date !== this.activeDateValues.at(-1)) {
+        result.push({ label: "Показать последнюю отчетную дату", patch: { date: this.activeDateValues.at(-1) || "" } });
       }
       if (!result.length) result.push({ label: "Сбросить лишние фильтры", patch: { q: "", code: "", budget: "", source: "", template: "all", post_filter: "" } });
       return result;
     },
 
     demoReadiness() {
-      return [
-        { label: "Данные загружены", ok: this.meta.records > 0 },
-        { label: "Есть РЧБ", ok: this.hasSource("РЧБ") },
-        { label: "Есть соглашения", ok: this.hasSource("Соглаш") },
-        { label: "Есть ГЗ", ok: this.hasSource("ГЗ") },
-        { label: "Есть БУАУ", ok: this.hasSource("БУАУ") },
-        { label: "Выборка не пустая", ok: this.mode === "compare" ? this.compare.rows.length > 0 : this.query.rows.length > 0 },
-        { label: "Источник цифры доступен", ok: (this.query.details || []).some((row) => row.id) },
-        { label: "Ошибок загрузки нет", ok: !this.quality.summary.errors },
-      ];
+      return this.readiness.checks || [];
     },
   },
 
   watch: {
+    // Автозагрузка отключается на время пакетного применения действий,
+    // чтобы один клик не запускал несколько одинаковых запросов.
     "filters.template"() {
       if (this.initialized && !this.suppressAutoLoad) this.loadData();
     },
@@ -287,10 +377,7 @@ createApp({
     "filters.source"() {
       if (this.initialized && !this.suppressAutoLoad) this.loadData();
     },
-    "filters.start"() {
-      if (this.initialized && !this.suppressAutoLoad && this.mode === "slice") this.loadData();
-    },
-    "filters.end"() {
+    "filters.date"() {
       if (this.initialized && !this.suppressAutoLoad && this.mode === "slice") this.loadData();
     },
     "filters.base"() {
@@ -328,27 +415,28 @@ createApp({
 
   methods: {
     async loadInitialData() {
+      // Справочники загружаются параллельно: они независимы и нужны до первого query.
       this.loading.meta = true;
       this.error = "";
       try {
-        const [meta, templates, metrics, quality, quickActions] = await Promise.all([
+        const [meta, templates, metrics, quality, quickActions, reportingDates] = await Promise.all([
           fetchJson("/api/meta"),
           fetchJson("/api/catalog/templates"),
           fetchJson("/api/catalog/metrics"),
           fetchJson("/api/quality"),
           fetchJson("/api/catalog/quick-actions"),
+          fetchJson("/api/catalog/reporting-dates"),
         ]);
-        this.meta = { records: 0, budgets: [], sources: [], snapshots: [], objects: [], ...meta };
+        this.meta = { records: 0, budgets: [], sources: [], snapshots: [], reporting_dates: reportingDates, objects: [], ...meta, reporting_dates: reportingDates };
         this.templates = templates;
         this.metrics = metrics.map((metric) => ({ ...metric, label: METRIC_LABELS[metric.code] || metric.label }));
         this.quickActions = quickActions;
         this.quality = { issues: [], summary: { warnings: 0, errors: 0 }, ...quality, summary: { warnings: 0, errors: 0, ...(quality.summary || {}) } };
         this.selectedMetrics = this.metrics.map((metric) => metric.code);
-        if (this.meta.snapshots.length) {
-          this.filters.start = this.meta.snapshots[0];
-          this.filters.end = this.meta.snapshots[this.meta.snapshots.length - 1];
-          this.filters.base = this.meta.snapshots[0];
-          this.filters.target = this.meta.snapshots[this.meta.snapshots.length - 1];
+        if (this.reportingDates.length) {
+          this.filters.date = this.reportingDates.at(-1).date;
+          this.filters.base = this.reportingDates[0].date;
+          this.filters.target = this.reportingDates.at(-1).date;
         }
       } catch (error) {
         console.error(error);
@@ -359,6 +447,7 @@ createApp({
     },
 
     async loadData() {
+      // В режиме среза основной результат и readiness идут одним набором параметров.
       if (this.mode === "compare") {
         await this.loadCompare();
         return;
@@ -367,7 +456,12 @@ createApp({
       this.error = "";
       try {
         const params = this.buildQueryParams(true);
-        this.query = await fetchJson(`/api/query?${params.toString()}`);
+        const [query, readiness] = await Promise.all([
+          fetchJson(`/api/query?${params.toString()}`),
+          fetchJson(`/api/readiness?${params.toString()}`),
+        ]);
+        this.query = query;
+        this.readiness = readiness;
         await nextTick();
         this.drawChart();
         await this.scrollToResultsIfNeeded();
@@ -398,14 +492,15 @@ createApp({
     },
 
     buildQueryParams(includeDates) {
+      // Единая сборка query string защищает export, chart и таблицы от расхождения фильтров.
       const params = new URLSearchParams();
       ["q", "code", "template", "budget", "source", "post_filter"].forEach((key) => {
         const value = String(this.filters[key] || "").trim();
         if (value) params.set(key, value);
       });
       if (includeDates) {
-        if (this.filters.start) params.set("start", this.filters.start);
-        if (this.filters.end) params.set("end", this.filters.end);
+        params.set("view", "as_of");
+        if (this.filters.date) params.set("date", this.filters.date);
       }
       params.set("metrics", this.activeMetricCodes.join(","));
       return params;
@@ -426,6 +521,7 @@ createApp({
     },
 
     async runWithSuppressedAutoLoad(callback, shouldScroll = false) {
+      // Пакетные изменения фильтров применяются атомарно с одним последующим loadData.
       this.suppressAutoLoad = true;
       try {
         callback();
@@ -450,17 +546,22 @@ createApp({
       }, { scrollToResults: true });
     },
 
-    onSmartInput() {
-      this.smartSuggestions = this.buildSmartSuggestions(this.smartInput);
+    onCommandInput() {
+      this.command.error = "";
+      this.command.suggestions = this.buildCommandSuggestions(this.command.text);
     },
 
-    buildSmartSuggestions(text) {
+    buildCommandSuggestions(text) {
+      // Умная строка не вызывает LLM: она распознает частые бюджетные сценарии
+      // и превращает их в те же actions, что быстрые кнопки и assistant.
       const value = String(text || "").trim();
       if (!value) return [];
       const lower = value.toLowerCase();
       const suggestions = [];
       const add = (code, title, description, action) => suggestions.push({ code, title, description, action });
       const fullMetrics = ["limit", "obligation", "cash", "agreement", "contract", "payment", "buau"];
+      const dateMatch = value.match(/\b(\d{2})[.](\d{2})[.](20\d{2})\b/);
+      const parsedDate = dateMatch ? `${dateMatch[3]}-${dateMatch[2]}-${dateMatch[1]}` : "";
       const requestedTemplate = lower.includes("скк") || lower.includes("6105")
         ? "skk"
         : lower.includes("кик") || lower.includes("978")
@@ -472,7 +573,22 @@ createApp({
               : this.filters.template;
 
       if (["сравн", "измен", "динамик"].some((word) => lower.includes(word))) {
-        add("apply_compare", "Сравнить периоды", "Показать изменения между первой и последней датой", { mode: "compare", template: requestedTemplate, metrics: this.activeMetricCodes });
+        add("apply_compare", "Сравнить две даты", "Показать изменения между первой и последней отчетной датой", { mode: "compare", template: requestedTemplate, base: this.activeDateValues[0] || "", target: this.activeDateValues.at(-1) || "", metrics: this.activeMetricCodes });
+      }
+      if (lower.includes("нет касс")) {
+        add("apply_no_cash", "Найти объекты без кассы", "Показать объекты с планом и нулевой кассой", { mode: "slice", template: requestedTemplate, q: "", post_filter: "no_cash", metrics: fullMetrics });
+      }
+      if (lower.includes("нет оплат") || lower.includes("нет платеж")) {
+        add("apply_no_payments", "Найти объекты без оплат", "Показать документы без оплат", { mode: "slice", template: requestedTemplate, q: "", post_filter: "no_payments", metrics: fullMetrics });
+      }
+      if (lower.includes("нет документ")) {
+        add("apply_no_documents", "Найти объекты без документов", "Показать план без документов", { mode: "slice", template: requestedTemplate, q: "", post_filter: "no_documents", metrics: fullMetrics });
+      }
+      if (lower.includes("низк") && lower.includes("исполн")) {
+        add("apply_low_cash", "Найти низкую кассу", "Касса меньше 25% от плана", { mode: "slice", template: requestedTemplate, q: "", post_filter: "low_cash", metrics: fullMetrics });
+      }
+      if (parsedDate) {
+        add("apply_date", `Показать на ${dateMatch[0]}`, "Применить выбранную отчетную дату", { mode: "slice", template: requestedTemplate, q: this.cleanSmartText(value), date: parsedDate, metrics: this.activeMetricCodes });
       }
 
       if (lower.includes("6105") || lower.includes("скк")) {
@@ -497,48 +613,139 @@ createApp({
       return suggestions;
     },
 
-    applyFirstSuggestion() {
-      if (!this.smartSuggestions.length) this.onSmartInput();
-      if (this.smartSuggestions[0]) return this.applySmartSuggestion(this.smartSuggestions[0]);
-      return Promise.resolve();
-    },
-
-    applySmartSuggestion(suggestion) {
-      this.selectedSuggestion = suggestion;
-      return this.applyAction(suggestion.action || {}, { scrollToResults: true });
-    },
-
-    async askAssistant() {
-      if (!this.assistant.message) return;
-      this.assistant.loading = true;
-      this.assistant.response = null;
-      this.error = "";
+    async runCommand() {
+      const text = String(this.command.text || "").trim();
+      if (!text) return;
+      this.command.loading = true;
+      this.command.error = "";
+      this.command.response = null;
       try {
         const response = await fetchJson("/api/assistant", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            message: this.assistant.message,
+            message: text,
             context: {
               mode: this.mode,
               template: this.filters.template,
+              date: this.filters.date,
               selected_metrics: this.activeMetricCodes,
-              available_dates: this.meta.snapshots,
+              available_dates: this.activeDateValues,
             },
           }),
         });
-        this.assistant.response = response;
-        this.assistant.history.unshift({ question: this.assistant.message, response });
+        await this.applyCommandResponse(response);
       } catch (error) {
         console.error(error);
-        this.error = "Помощник недоступен. Можно использовать быстрые действия или умную строку.";
+        this.command.suggestions = this.buildCommandSuggestions(text);
+        if (this.command.suggestions[0]) {
+          await this.applyCommandSuggestion(this.command.suggestions[0]);
+        } else {
+          this.command.error = "Не удалось разобрать запрос. Попробуйте уточнить объект, код или сценарий.";
+        }
       } finally {
-        this.assistant.loading = false;
+        this.command.loading = false;
       }
+    },
+
+    async applyCommandResponse(response) {
+      this.command.response = response;
+      this.command.source = response?.mode || "";
+      this.assistant.response = response;
+      this.assistant.history.unshift({ question: this.command.text, response });
+      await this.applyAction(response?.action || {}, { scrollToResults: true });
+    },
+
+    applyCommandSuggestion(suggestion) {
+      return this.applyAction(suggestion.action || {}, { scrollToResults: true });
+    },
+
+    onSmartInput() {
+      this.onCommandInput();
+    },
+
+    buildSmartSuggestions(text) {
+      return this.buildCommandSuggestions(text);
+    },
+
+    applyFirstSuggestion() {
+      return this.runCommand();
+    },
+
+    applySmartSuggestion(suggestion) {
+      return this.applyCommandSuggestion(suggestion);
+    },
+
+    cleanSmartText(value) {
+      return String(value || "")
+        .replace(/\b\d{2}[.]\d{2}[.]20\d{2}\b/g, "")
+        .replace(/\b(на|сравни|сравнить|где|нет|кассы|оплат|платежей|документов|низкое|исполнение)\b/gi, " ")
+        .trim();
+    },
+
+    async askAssistant() {
+      this.command.text = this.assistant.message || this.command.text;
+      return this.runCommand();
     },
 
     applyAssistantAction(action) {
       return this.applyAction(action || {}, { scrollToResults: true });
+    },
+
+    runFollowup(action) {
+      if (!action) return Promise.resolve();
+      if (action.download === "excel") {
+        this.exportExcel();
+        return Promise.resolve();
+      }
+      if (action.open === "top_risk" && this.topRisks[0]) {
+        return this.openObject(this.topRisks[0]);
+      }
+      if (action.open_view) {
+        this.setView(action.open_view);
+      }
+      if (action.post_filter) {
+        return this.applyProblemFilter(action.post_filter);
+      }
+      return Promise.resolve();
+    },
+
+    async explainResult() {
+      this.loading.explain = true;
+      this.error = "";
+      try {
+        const payload = {
+          attention_summary: this.query.attention_summary || {},
+          compare_insights: this.compare.compare_insights || {},
+          readiness: this.readiness || {},
+          top_risks: this.topRisks.slice(0, 5).map((item) => ({
+            object_key: item.object_key,
+            object_name: item.object_name,
+            risk_score: item.risk_score,
+            risk_label: item.risk_label,
+            plan: item.plan,
+            reasons: item.reasons || item.problem_reasons || [],
+          })),
+          filters: {
+            mode: this.mode,
+            template: this.filters.template,
+            date: this.filters.date,
+            base: this.filters.base,
+            target: this.filters.target,
+            post_filter: this.filters.post_filter,
+          },
+        };
+        this.explanation = await fetchJson("/api/explain", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ kind: this.mode === "compare" ? "compare" : "query", payload }),
+        });
+      } catch (error) {
+        console.error(error);
+        this.error = "Не удалось получить простое объяснение.";
+      } finally {
+        this.loading.explain = false;
+      }
     },
 
     async applyAction(action, options = {}) {
@@ -559,14 +766,14 @@ createApp({
         this.filters.post_filter = action.post_filter || "";
         if (action.metrics?.length) this.selectedMetrics = action.metrics;
         if (this.mode === "compare") {
-          this.filters.base = action.base || this.meta.snapshots[0] || "";
-          this.filters.target = action.target || this.meta.snapshots[this.meta.snapshots.length - 1] || "";
+          this.filters.base = action.base || this.activeDateValues[0] || "";
+          this.filters.target = action.target || this.activeDateValues.at(-1) || "";
           this.currentView = "changes";
         } else {
-          this.filters.start = action.start || this.meta.snapshots[0] || "";
-          this.filters.end = action.end || this.meta.snapshots[this.meta.snapshots.length - 1] || "";
-          this.currentView = "overview";
+          this.filters.date = action.date || this.filters.date || this.activeDateValues.at(-1) || "";
+          this.currentView = action.open_view || (action.post_filter ? "problems" : "overview");
         }
+        this.explanation = null;
       }, shouldScroll);
     },
 
@@ -574,6 +781,14 @@ createApp({
       await this.runWithSuppressedAutoLoad(() => {
         Object.assign(this.filters, item.patch || {});
       }, true);
+    },
+
+    applyProblemFilter(postFilter) {
+      return this.applyAction({ mode: "slice", post_filter: postFilter, metrics: ["limit", "obligation", "cash", "agreement", "contract", "payment", "buau"] }, { scrollToResults: true });
+    },
+
+    setProblemRiskFilter(filter) {
+      this.problemRiskFilter = filter;
     },
 
     scheduleLoad() {
@@ -597,6 +812,7 @@ createApp({
     },
 
     drawChart() {
+      // Canvas рисуется вручную, чтобы не добавлять сборку или внешнюю chart-библиотеку.
       const canvas = this.$refs.chart;
       if (!canvas || this.mode !== "slice") return;
       const styles = getComputedStyle(document.documentElement);
@@ -683,8 +899,11 @@ createApp({
       this.filters.budget = "";
       this.filters.source = "";
       this.filters.post_filter = "";
-      this.smartInput = "";
-      this.smartSuggestions = [];
+      this.command.text = "";
+      this.command.suggestions = [];
+      this.command.response = null;
+      this.command.source = "";
+      this.explanation = null;
       this.loadData();
     },
 
@@ -703,65 +922,157 @@ createApp({
       }
     },
 
+    async openObject(row) {
+      if (!row?.object_key) return;
+      this.loading.object = true;
+      this.objectRowsOpen = false;
+      this.objectCard = null;
+      this.$refs.objectDialog?.showModal();
+      try {
+        const params = new URLSearchParams();
+        params.set("date", this.mode === "compare" ? this.filters.target : this.filters.date);
+        params.set("template", this.filters.template);
+        params.set("object_key", row.object_key);
+        if (row.budget) params.set("budget", row.budget);
+        this.objectCard = await fetchJson(`/api/object?${params.toString()}`);
+      } catch (error) {
+        console.error(error);
+        this.error = "Не удалось открыть карточку объекта.";
+      } finally {
+        this.loading.object = false;
+      }
+    },
+
+    exportExcel() {
+      const params = this.buildQueryParams(this.mode !== "compare");
+      if (this.mode === "compare") {
+        params.set("mode", "compare");
+        if (this.filters.base) params.set("base", this.filters.base);
+        if (this.filters.target) params.set("target", this.filters.target);
+      } else if (this.filters.date) {
+        params.set("date", this.filters.date);
+      }
+      window.location.href = `/api/export.xlsx?${params.toString()}`;
+    },
+
     exportCsv() {
       const createdAt = new Date().toLocaleString("ru-RU");
-      const metricCodes = this.activeMetricCodes;
       const header = [
         ["Отчёт", this.activeTemplateLabel],
         ["Дата формирования", createdAt],
-        ["Период", this.mode === "compare" ? `${this.filters.base} - ${this.filters.target}` : `${this.filters.start} - ${this.filters.end}`],
-        ["Показатели", this.activeMetricObjects.map((metric) => metric.label).join(", ")],
+        [this.mode === "compare" ? "Сравнение" : "На дату", this.mode === "compare" ? `${this.filters.base} - ${this.filters.target}` : this.currentDateLabel],
+        ["Показатели", "План, Документы, Оплачено, Касса, Статус"],
         [],
       ];
       let rows;
       if (this.mode === "compare") {
+        const metricCodes = this.activeMetricCodes;
         const metricHeaders = this.activeMetricObjects.flatMap((metric) => [`${metric.label} база`, `${metric.label} цель`, `${metric.label} изменение`]);
         rows = [["Код", "Объект", "Бюджет", ...metricHeaders], ...this.compare.rows.map((row) => [row.object_code, row.object_name, row.budget, ...metricCodes.flatMap((metric) => {
           const values = row.metrics?.[metric] || {};
           return [values.base, values.target, values.delta];
         })])];
       } else {
-        rows = [["Код", "Объект", "Бюджет", "Источники", ...this.activeMetricObjects.map((metric) => metric.label)], ...this.query.rows.map((row) => [row.object_code, row.object_name, row.budget, row.sources, ...metricCodes.map((metric) => row[metric])])];
+        rows = [["Объект", "План", "Документы", "Оплачено", "Касса", "Статус"], ...this.simpleRows.map((row) => [
+          row.object_name || row.object_code,
+          row.plan,
+          row.documents,
+          row.paid,
+          row.cash,
+          row.statusLabel,
+        ])];
       }
       const csv = [...header, ...rows].map((line) => line.map(csvCell).join(";")).join("\n");
       const blob = new Blob(["\ufeff", csv], { type: "text/csv;charset=utf-8" });
       const link = document.createElement("a");
       link.href = URL.createObjectURL(blob);
-      const suffix = this.mode === "compare" ? `compare_${this.filters.template}_${this.filters.base}_${this.filters.target}` : `${this.filters.template}_${this.filters.end || "period"}`;
+      const suffix = this.mode === "compare" ? `compare_${this.filters.template}_${this.filters.base}_${this.filters.target}` : `${this.filters.template}_${this.filters.date || "as_of"}`;
       link.download = `analytics_${suffix}.csv`;
       link.click();
       URL.revokeObjectURL(link.href);
     },
 
     rowStatus(row) {
-      const plan = Number(row.limit || 0) + Number(row.obligation || 0);
-      const execution = Number(row.cash || 0) + Number(row.payment || 0) + Number(row.buau || 0);
-      const documents = Number(row.agreement || 0) + Number(row.contract || 0);
-      if (plan > 0 && execution === 0) return "no_execution";
-      if (plan > 0 && execution / plan < 0.25) return "low_execution";
-      if (execution >= plan && plan > 0) return "executed";
-      if (documents > 0 && execution === 0) return "has_documents_no_payment";
+      // Статус в таблице следует тем же проблемным причинам, что и backend-фильтры.
+      const reasons = row.problem_reasons || [];
+      if (reasons.includes("no_documents")) return "no_documents";
+      if (reasons.includes("no_payments")) return "no_payments";
+      if (reasons.includes("no_cash")) return "no_cash";
+      if (reasons.includes("low_cash")) return "low_cash";
+      if (reasons.includes("data_gap")) return "data_gap";
+      const pipeline = row.pipeline || this.buildPipeline(row);
+      if (!reasons.length) {
+        if (pipeline.plan > 0 && pipeline.documents === 0) return "no_documents";
+        if (pipeline.documents > 0 && pipeline.paid === 0) return "no_payments";
+        if (pipeline.plan > 0 && pipeline.cash === 0) return "no_cash";
+        if (pipeline.plan > 0 && pipeline.cash / pipeline.plan < 0.25) return "low_cash";
+      }
+      if (pipeline.plan > 0 && pipeline.cash >= pipeline.plan) return "executed";
       return "normal";
     },
 
     rowStatusLabel(status) {
       return {
-        no_execution: "Нет кассы",
-        low_execution: "Низкое исполнение",
+        no_documents: "Нет документов",
+        no_payments: "Нет оплат",
+        no_cash: "Нет кассы",
+        low_cash: "Низкая касса",
+        data_gap: "Разрыв данных",
         executed: "Исполнено",
-        has_documents_no_payment: "Есть документы, нет оплат",
         normal: "Без явных проблем",
       }[status] || "Без явных проблем";
     },
 
     rowStatusClass(status) {
       return {
-        no_execution: "danger",
-        low_execution: "warning",
+        no_documents: "danger",
+        no_payments: "danger",
+        no_cash: "danger",
+        low_cash: "warning",
+        data_gap: "warning",
         executed: "ok",
-        has_documents_no_payment: "warning",
         normal: "neutral",
       }[status] || "neutral";
+    },
+
+    buildPipeline(row) {
+      const plan = Number(row.limit || 0) + Number(row.obligation || 0);
+      const documents = Number(row.agreement || 0) + Number(row.contract || 0);
+      const paid = Number(row.payment || 0) + Number(row.buau || 0);
+      const cash = Number(row.cash || 0);
+      return { plan, documents, paid, cash, missing_steps: [] };
+    },
+
+    togglePipeline(row) {
+      this.expandedPipelines[row.rowKey] = !this.expandedPipelines[row.rowKey];
+    },
+
+    problemReasonLabel(reason) {
+      return {
+        no_documents: "Нет документов",
+        no_payments: "Нет оплат",
+        no_cash: "Нет кассы",
+        low_cash: "Низкая касса",
+        data_gap: "Разрыв данных",
+      }[reason] || "Проблема данных";
+    },
+
+    riskLabel(level) {
+      return {
+        critical: "Критичный",
+        high: "Высокий",
+        medium: "Средний",
+        low: "Низкий",
+      }[level] || "Низкий";
+    },
+
+    riskClass(level) {
+      return {
+        critical: "danger",
+        high: "high",
+        medium: "warning",
+        low: "neutral",
+      }[level] || "neutral";
     },
 
     hasSource(fragment) {

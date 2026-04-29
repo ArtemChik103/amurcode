@@ -1,4 +1,5 @@
 :root {
+  /* Темная тема является базовой: light overrides переопределяют те же токены. */
   color-scheme: dark;
   --bg: #0b1117;
   --bg-2: #0f1720;
@@ -35,6 +36,7 @@
 }
 
 :root[data-theme="light"] {
+  /* Все цвета UI идут через CSS-переменные, чтобы переключение темы не трогало разметку. */
   color-scheme: light;
   --bg: #eef3f7;
   --bg-2: #f7fafc;
@@ -146,6 +148,7 @@ p {
 }
 
 #app {
+  /* Основной layout: фиксированная панель фильтров и рабочая область результатов. */
   display: grid;
   grid-template-columns: 308px minmax(0, 1fr);
   min-height: 100vh;
@@ -440,8 +443,10 @@ label span,
 
 .quick-start,
 .smart-search,
-.assistant-card,
-.answer-card {
+.answer-card,
+.top-risks {
+  /* Верхние рабочие блоки выглядят одинаково, чтобы быстрые сценарии,
+     поиск и вывод считывались как единая зона действий. */
   margin: 18px 30px 0;
   padding: 16px;
   border: 1px solid var(--line);
@@ -461,7 +466,6 @@ label span,
 
 .quick-start h3,
 .smart-search h3,
-.assistant-card h3,
 .answer-card h3 {
   color: var(--heading);
   font-size: 18px;
@@ -509,8 +513,27 @@ label span,
   font-size: 16px;
 }
 
+.command-button {
+  margin-top: 10px;
+}
+
 .examples {
   margin-top: 8px;
+}
+
+.command-status,
+.command-message {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.command-status.danger {
+  color: var(--danger);
+}
+
+.command-message {
+  color: var(--text);
 }
 
 .suggestions {
@@ -520,13 +543,7 @@ label span,
   margin-top: 12px;
 }
 
-.assistant-card {
-  display: grid;
-  gap: 12px;
-}
-
-.assistant-actions,
-.assistant-response,
+.command-followups,
 .empty-actions {
   display: flex;
   flex-wrap: wrap;
@@ -534,17 +551,8 @@ label span,
   gap: 10px;
 }
 
-.assistant-response {
-  padding: 12px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--panel-soft);
-}
-
-.assistant-response p {
-  flex-basis: 100%;
-  color: var(--text);
-  line-height: 1.45;
+.command-followups {
+  margin-top: 10px;
 }
 
 .answer-card ul {
@@ -557,6 +565,21 @@ label span,
   color: var(--text);
 }
 
+.explain-button {
+  margin-top: 12px;
+}
+
+.explain-result {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.explain-result h4 {
+  color: var(--heading);
+  font-size: 15px;
+}
+
 .answer-card.warning {
   border-color: color-mix(in srgb, var(--warn) 42%, transparent);
   background: color-mix(in srgb, var(--warn) 9%, var(--panel));
@@ -565,6 +588,51 @@ label span,
 .answer-card.empty {
   border-color: color-mix(in srgb, var(--danger) 36%, transparent);
   background: color-mix(in srgb, var(--danger) 8%, var(--panel));
+}
+
+.top-risk-list,
+.compare-insights {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 10px;
+}
+
+.top-risk-item,
+.compare-insight-item {
+  display: grid;
+  gap: 5px;
+  min-height: 66px;
+  padding: 10px 12px;
+  text-align: left;
+  border-color: color-mix(in srgb, var(--danger) 28%, var(--line));
+  background: var(--panel-soft);
+}
+
+.top-risk-item strong,
+.compare-insight-item strong {
+  color: var(--heading);
+}
+
+.top-risk-item span,
+.compare-insight-item span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.compare-insights {
+  padding: 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.compare-insight-section {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+.compare-insight-section h4 {
+  margin: 0;
+  color: var(--heading);
 }
 
 .view-tabs button {
@@ -723,6 +791,7 @@ canvas {
 }
 
 .table-wrap {
+  /* Таблицы остаются внутри панели и прокручиваются независимо от страницы. */
   overflow: auto;
   max-height: 430px;
 }
@@ -840,8 +909,109 @@ th.number {
   color: var(--muted);
 }
 
+.risk-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.risk-pill.danger,
+.risk-text.danger {
+  border-color: color-mix(in srgb, var(--danger) 44%, transparent);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
+}
+
+.risk-pill.high,
+.risk-text.high {
+  border-color: color-mix(in srgb, #fb923c 44%, transparent);
+  background: color-mix(in srgb, #fb923c 12%, transparent);
+  color: #fb923c;
+}
+
+.risk-pill.warning,
+.risk-text.warning {
+  border-color: color-mix(in srgb, var(--warn) 44%, transparent);
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  color: var(--warn);
+}
+
+.risk-pill.neutral,
+.risk-text.neutral {
+  color: var(--muted);
+}
+
+.risk-text {
+  font-weight: 800;
+}
+
 .simple-table table {
-  min-width: 920px;
+  min-width: 1040px;
+}
+
+.pipeline-row td {
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+.pipeline-line {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(130px, 1fr));
+  gap: 8px;
+}
+
+.pipeline-line span,
+.problem-item {
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-soft);
+}
+
+.problem-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.problem-actions .active {
+  border-color: color-mix(in srgb, var(--accent) 48%, transparent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.problem-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+  padding: 16px;
+}
+
+.problem-group {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+.problem-group h4 {
+  margin: 0;
+  color: var(--heading);
+}
+
+.problem-item {
+  display: grid;
+  gap: 4px;
+}
+
+.problem-item span {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .readiness-list {
@@ -852,9 +1022,10 @@ th.number {
 }
 
 .readiness-list div {
-  display: flex;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
   align-items: center;
-  gap: 8px;
+  gap: 5px 8px;
   padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: 7px;
@@ -875,9 +1046,33 @@ th.number {
   color: var(--success);
 }
 
+.readiness-list .warn span {
+  background: color-mix(in srgb, var(--warn) 18%, transparent);
+  color: var(--warn);
+}
+
 .readiness-list .bad span {
   background: color-mix(in srgb, var(--danger) 18%, transparent);
   color: var(--danger);
+}
+
+.readiness-list small {
+  grid-column: 2;
+  color: var(--muted);
+  line-height: 1.3;
+}
+
+.row-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.compact-button {
+  min-height: 30px;
+  padding: 5px 9px;
+  font-size: 12px;
 }
 
 .icon-only {
@@ -933,6 +1128,29 @@ dialog {
 dialog::backdrop {
   background: rgba(0, 0, 0, 0.55);
   backdrop-filter: blur(5px);
+}
+
+.object-card-body {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
+.object-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.dialog-section h4 {
+  margin-bottom: 8px;
+  color: var(--heading);
+}
+
+.object-documents {
+  display: grid;
+  gap: 8px;
 }
 
 .dialog-head {
@@ -1001,6 +1219,7 @@ summary {
 }
 
 @media (max-width: 1050px) {
+  /* На планшетах и телефонах sidebar становится обычным верхним блоком. */
   #app {
     grid-template-columns: 1fr;
   }
@@ -1036,7 +1255,6 @@ summary {
   .view-tabs,
   .quick-start,
   .smart-search,
-  .assistant-card,
   .answer-card {
     margin-right: 14px;
     margin-left: 14px;
