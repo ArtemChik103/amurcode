@@ -201,11 +201,24 @@ function makeInstance() {
     details: [{ id: "r1", event_date: "2026-04-01", source: "РЧБ", object_code: "101016105", object_name: "СКК объект", cash: 10 }],
     timeline: [{ date: "2026-04-01", limit: 100, cash: 10 }],
     count: 1,
+    attention_summary: {
+      title: "Найдено: что требует внимания",
+      severity: "warning",
+      bullets: ["Есть объекты с низкой кассой."],
+      next_actions: [{ label: "Скачать Excel", action: { download: "excel" } }],
+      top_risks: [],
+    },
   };
   instance.compare = {
     rows: [
       { object_code: "101016105", object_name: "СКК объект", budget: "", metrics: { limit: { base: 1, target: 3, delta: 2, delta_percent: 200 }, cash: { base: 2, target: 1, delta: -1, delta_percent: -50 } }, total_delta: 3 },
     ],
+    compare_insights: {
+      title: "Изменения за период",
+      severity: "normal",
+      bullets: ["Нет существенных изменений."],
+      next_actions: [{ label: "Показать новые проблемы", action: { open_view: "changes" } }],
+    },
   };
   for (const [name, getter] of Object.entries(capturedOptions.computed)) {
     Object.defineProperty(instance, name, { get: getter.bind(instance), configurable: true });
@@ -219,6 +232,8 @@ function makeInstance() {
     await this.scrollToResultsIfNeeded();
   };
   instance.drawChart = function drawChartMock() {};
+  instance.drawFunnelChart = function drawFunnelChartMock() {};
+  instance.drawRiskChart = function drawRiskChartMock() {};
   return instance;
 }
 
@@ -247,6 +262,9 @@ function makeInstance() {
   assert.equal(vmApp.loadCalls, 1);
   assert.equal(scrollCalls, 1);
   assert.equal(vmApp.pendingResultScroll, false);
+  assert.equal(vmApp.resultNextActions[0].label, "Скачать Excel");
+  assert.equal(vmApp.funnelValues.plan, 120);
+  assert.equal(vmApp.riskDistribution.low, 1);
 
   scrollCalls = 0;
   await vmApp.applyQuickAction({ mode: "compare", template: "skk", metrics: ["limit"] });
@@ -255,6 +273,10 @@ function makeInstance() {
   assert.equal(vmApp.filters.base, "2025-02-01");
   assert.equal(vmApp.filters.target, "2026-04-01");
   assert.equal(scrollCalls, 1);
+  assert.equal(vmApp.resultNextActions[0].label, "Показать новые проблемы");
+
+  await vmApp.applyAction({ mode: "slice", template: "skk", demo_mode: "skk_risks" }, { scrollToResults: false });
+  assert.equal(vmApp.demoMode, "skk_risks");
 
   const params = vmApp.buildQueryParams(true);
   assert.equal(params.get("template"), "skk");

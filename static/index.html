@@ -191,12 +191,29 @@
           </div>
         </section>
 
+        <section v-if="resultNextActions.length" class="next-actions">
+          <div class="section-kicker">Что делать дальше</div>
+          <div class="next-action-list">
+            <button v-for="item in resultNextActions" :key="item.label" type="button" class="ghost" @click="runFollowup(item.action)">
+              {{ item.label }}
+            </button>
+          </div>
+        </section>
+
+        <section v-if="demoMode === 'skk_risks'" class="demo-guide">
+          <strong>Демо-сценарий</strong>
+          <span>1. Посмотрите вывод 2. Откройте главный риск 3. Покажите источник цифр 4. Скачайте Excel</span>
+          <button type="button" class="ghost" @click="runFollowup({ open: 'top_risk' })">Открыть главный риск</button>
+          <button type="button" class="ghost" @click="exportExcel">Скачать Excel</button>
+        </section>
+
         <section v-if="mode === 'slice' && topRisks.length" class="top-risks">
           <div class="section-kicker">Главные риски</div>
           <div class="top-risk-list">
             <button v-for="row in topRisks" :key="row.object_key" type="button" class="top-risk-item" @click="openObject(row)">
-              <strong>{{ row.object_name }}</strong>
-              <span>{{ row.risk_label }} · {{ formatMoney(row.plan) }}</span>
+              <strong>{{ row.short_name || row.object_name }}</strong>
+              <span>{{ row.object_code }} · {{ row.budget }}</span>
+              <span>{{ row.risk_label }} · {{ formatMoney(row.plan) }} план · {{ formatMoney(row.cash) }} касса</span>
             </button>
           </div>
         </section>
@@ -226,6 +243,26 @@
               <button type="button" class="ghost" @click="readinessOpen = !readinessOpen">Проверить перед показом</button>
             </div>
             <canvas ref="chart" height="280"></canvas>
+          </article>
+
+          <article class="panel chart-panel">
+            <div class="panel-head">
+              <div>
+                <h3>Воронка денег</h3>
+                <p>План · документы · оплаты · касса</p>
+              </div>
+            </div>
+            <canvas ref="funnelChart" height="230"></canvas>
+          </article>
+
+          <article class="panel chart-panel">
+            <div class="panel-head">
+              <div>
+                <h3>Риски</h3>
+                <p>Критичные · высокие · средние · низкие</p>
+              </div>
+            </div>
+            <canvas ref="riskChart" height="230"></canvas>
           </article>
 
           <article v-if="readinessOpen" class="panel readiness-panel">
@@ -463,6 +500,12 @@
               <span class="risk-pill" :class="riskClass(objectCard.risk_level)">{{ objectCard.risk_label }} · {{ objectCard.risk_score }}</span>
               <span v-for="source in objectCard.sources" :key="source" class="pill muted">{{ source }}</span>
             </div>
+          <div v-if="objectCard?.diagnosis" class="object-diagnosis" :class="objectCard.diagnosis.severity">
+            <h4>{{ objectCard.diagnosis.title }}</h4>
+            <ul>
+              <li v-for="item in objectCard.diagnosis.bullets" :key="item">{{ item }}</li>
+            </ul>
+          </div>
           <div class="pipeline-line">
             <span>План {{ formatMoney(objectCard.pipeline?.plan) }}</span>
             <span>Документы {{ formatMoney(objectCard.pipeline?.documents) }}</span>

@@ -187,6 +187,41 @@ class PlaywrightUiTests(unittest.TestCase):
         self.assertNotIn("problem_reasons", body)
         self.assertNotIn("pipeline", body)
 
+    def test_demo_60_seconds_flow(self):
+        self.click_button("Демо за 60 секунд")
+        self.page.get_by_text("Демо-сценарий").wait_for(timeout=10000)
+        self.page.get_by_text("Главные риски").wait_for(timeout=10000)
+        self.page.get_by_role("heading", name="Проблемы").wait_for(timeout=10000)
+        self.click_button("Открыть главный риск")
+        self.page.get_by_text("Что проверить").wait_for(timeout=10000)
+
+    def test_next_actions_visible_after_quick_action(self):
+        self.click_button("Собрать отчет СКК")
+        self.page.get_by_text("Что делать дальше").wait_for(timeout=10000)
+        self.click_button("Показать без кассы")
+        self.page.get_by_role("heading", name="Проблемы").wait_for(timeout=10000)
+
+    def test_overview_charts_are_visible(self):
+        self.click_button("Собрать отчет СКК")
+        self.page.get_by_text("Воронка денег").wait_for(timeout=10000)
+        self.page.get_by_role("heading", name="Риски").wait_for(timeout=10000)
+        canvas = self.page.locator("canvas").nth(1)
+        canvas.wait_for(timeout=10000)
+        box = canvas.bounding_box()
+        self.assertIsNotNone(box)
+        self.assertGreater(box["width"], 20)
+        has_pixels = canvas.evaluate(
+            """(node) => {
+                const ctx = node.getContext('2d');
+                const data = ctx.getImageData(0, 0, node.width, node.height).data;
+                for (let i = 3; i < data.length; i += 4) {
+                    if (data[i] !== 0) return true;
+                }
+                return false;
+            }"""
+        )
+        self.assertTrue(has_pixels)
+
     def test_problem_rows_show_risk(self):
         self.click_button("Проблемные СКК")
         self.click_button("Проблемы")
@@ -258,6 +293,10 @@ class PlaywrightUiTests(unittest.TestCase):
             self.click_button("Скачать Excel")
         excel = excel_info.value
         self.assertRegex(excel.suggested_filename, r"analytics_.*\.xlsx")
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / excel.suggested_filename
+            excel.save_as(target)
+            self.assertGreater(target.stat().st_size, 0)
 
     def test_no_technical_words_on_primary_screen(self):
         body_text = self.page.locator("body").inner_text()

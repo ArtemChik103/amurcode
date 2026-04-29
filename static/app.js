@@ -142,6 +142,7 @@ createApp({
 
       error: "",
       explanation: null,
+      demoMode: "",
       debounceTimer: null,
       chartRedraw: null,
       initialized: false,
@@ -275,6 +276,23 @@ createApp({
       return this.buildPipeline(totals);
     },
 
+    resultNextActions() {
+      if (this.mode === "compare") return this.compare.compare_insights?.next_actions || [];
+      return this.query.attention_summary?.next_actions || [];
+    },
+
+    funnelValues() {
+      return this.simpleTotals;
+    },
+
+    riskDistribution() {
+      return this.simpleRows.reduce((acc, row) => {
+        const level = row.risk_level || "low";
+        acc[level] = (acc[level] || 0) + 1;
+        return acc;
+      }, { critical: 0, high: 0, medium: 0, low: 0 });
+    },
+
     hasProblems() {
       return this.problemRows.length > 0;
     },
@@ -393,14 +411,22 @@ createApp({
       },
     },
     currentView() {
-      nextTick(() => this.drawChart());
+      nextTick(() => {
+        this.drawChart();
+        this.drawFunnelChart();
+        this.drawRiskChart();
+      });
     },
   },
 
   async mounted() {
     this.theme = localStorage.getItem("analytics-theme") || "dark";
     this.applyTheme();
-    this.chartRedraw = debounce(() => this.drawChart(), 200);
+    this.chartRedraw = debounce(() => {
+      this.drawChart();
+      this.drawFunnelChart();
+      this.drawRiskChart();
+    }, 200);
     await this.loadInitialData();
     this.initialized = true;
     await this.loadData();
@@ -464,6 +490,8 @@ createApp({
         this.readiness = readiness;
         await nextTick();
         this.drawChart();
+        this.drawFunnelChart();
+        this.drawRiskChart();
         await this.scrollToResultsIfNeeded();
       } catch (error) {
         console.error(error);
@@ -757,6 +785,7 @@ createApp({
           this.filters.source = "";
           this.filters.post_filter = "";
         }
+        this.demoMode = action.demo_mode === "skk_risks" ? "skk_risks" : "";
         if (action.mode) this.mode = action.mode;
         if (action.template) this.filters.template = action.template;
         if (action.q !== undefined) this.filters.q = action.q;
@@ -804,7 +833,11 @@ createApp({
       this.theme = this.theme === "dark" ? "light" : "dark";
       localStorage.setItem("analytics-theme", this.theme);
       this.applyTheme();
-      nextTick(() => this.drawChart());
+      nextTick(() => {
+        this.drawChart();
+        this.drawFunnelChart();
+        this.drawRiskChart();
+      });
     },
 
     applyTheme() {
@@ -880,6 +913,111 @@ createApp({
       ctx.stroke();
     },
 
+    prepareCanvas(canvas, fallbackHeight = 220) {
+      if (!canvas) return null;
+      const ratio = window.devicePixelRatio || 1;
+      const width = canvas.clientWidth || canvas.parentElement?.clientWidth || 420;
+      const height = canvas.clientHeight || Number(canvas.getAttribute("height")) || fallbackHeight;
+      canvas.width = Math.floor(width * ratio);
+      canvas.height = Math.floor(height * ratio);
+      const ctx = canvas.getContext("2d");
+      ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+      ctx.clearRect(0, 0, width, height);
+      return { ctx, width, height };
+    },
+
+    drawNoData(ctx, width, height) {
+      const styles = getComputedStyle(document.documentElement);
+      ctx.fillStyle = styles.getPropertyValue("--chart-text").trim() || "#63717b";
+      ctx.font = "14px Arial";
+      ctx.textAlign = "center";
+      ctx.fillText("Нет данных", width / 2, height / 2);
+      ctx.textAlign = "left";
+    },
+
+    drawFunnelChart() {
+      const prepared = this.prepareCanvas(this.$refs.funnelChart, 230);
+      if (!prepared || this.mode !== "slice" || this.currentView !== "overview") return;
+      const { ctx, width, height } = prepared;
+      const styles = getComputedStyle(document.documentElement);
+      const text = styles.getPropertyValue("--chart-text").trim() || "#63717b";
+      const accent = styles.getPropertyValue("--accent").trim() || "#0f766e";
+      const warn = styles.getPropertyValue("--warn").trim() || "#d97706";
+      const values = [
+        ["План", Number(this.funnelValues.plan || 0)],
+        ["Документы", Number(this.funnelValues.documents || 0)],
+        ["Оплачено", Number(this.funnelValues.paid || 0)],
+        ["Касса", Number(this.funnelValues.cash || 0)],
+      ];
+      const max = Math.max(...values.map((item) => item[1]));
+      if (!max) {
+        this.drawNoData(ctx, width, height);
+        return;
+      }
+      const left = 92;
+      const barHeight = 24;
+      const gap = 21;
+      const top = 24;
+      values.forEach(([label, value], index) => {
+        const y = top + index * (barHeight + gap);
+        const barWidth = Math.max(3, (width - left - 28) * (value / max));
+        ctx.fillStyle = index < 2 ? accent : warn;
+        ctx.fillRect(left, y, barWidth, barHeight);
+        ctx.fillStyle = text;
+        ctx.font = "12px Arial";
+        ctx.fillText(label, 12, y + 17);
+        ctx.fillText(this.formatMoney(value), left, y + barHeight + 15);
+      });
+    },
+
+    drawRiskChart() {
+      const prepared = this.prepareCanvas(this.$refs.riskChart, 230);
+      if (!prepared || this.mode !== "slice" || this.currentView !== "overview") return;
+      const { ctx, width, height } = prepared;
+      const styles = getComputedStyle(document.documentElement);
+      const text = styles.getPropertyValue("--chart-text").trim() || "#63717b";
+      const colors = {
+        critical: styles.getPropertyValue("--danger").trim() || "#dc2626",
+        high: "#f97316",
+        medium: styles.getPropertyValue("--warn").trim() || "#d97706",
+        low: styles.getPropertyValue("--accent").trim() || "#0f766e",
+      };
+      const labels = [
+        ["critical", "Критичные"],
+        ["high", "Высокие"],
+        ["medium", "Средние"],
+        ["low", "Низкие"],
+      ];
+      const values = labels.map(([key, label]) => [key, label, Number(this.riskDistribution[key] || 0)]);
+      const total = values.reduce((sum, item) => sum + item[2], 0);
+      if (!total) {
+        this.drawNoData(ctx, width, height);
+        return;
+      }
+      const cx = Math.min(width * 0.34, 110);
+      const cy = 92;
+      const radius = 58;
+      let start = -Math.PI / 2;
+      values.forEach(([key, , value]) => {
+        const angle = (value / total) * Math.PI * 2;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.arc(cx, cy, radius, start, start + angle);
+        ctx.closePath();
+        ctx.fillStyle = colors[key];
+        ctx.fill();
+        start += angle;
+      });
+      values.forEach(([key, label, value], index) => {
+        const y = 34 + index * 32;
+        ctx.fillStyle = colors[key];
+        ctx.fillRect(width * 0.58, y, 14, 14);
+        ctx.fillStyle = text;
+        ctx.font = "12px Arial";
+        ctx.fillText(`${label}: ${value}`, width * 0.58 + 22, y + 12);
+      });
+    },
+
     setMode(mode) {
       if (!["slice", "compare"].includes(mode) || this.mode === mode) return;
       this.mode = mode;
@@ -889,7 +1027,11 @@ createApp({
 
     setView(view) {
       this.currentView = view;
-      nextTick(() => this.drawChart());
+      nextTick(() => {
+        this.drawChart();
+        this.drawFunnelChart();
+        this.drawRiskChart();
+      });
     },
 
     resetFilters() {
@@ -904,6 +1046,7 @@ createApp({
       this.command.response = null;
       this.command.source = "";
       this.explanation = null;
+      this.demoMode = "";
       this.loadData();
     },
 

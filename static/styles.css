@@ -444,6 +444,8 @@ label span,
 .quick-start,
 .smart-search,
 .answer-card,
+.next-actions,
+.demo-guide,
 .top-risks {
   /* Верхние рабочие блоки выглядят одинаково, чтобы быстрые сценарии,
      поиск и вывод считывались как единая зона действий. */
@@ -544,15 +546,32 @@ label span,
 }
 
 .command-followups,
-.empty-actions {
+.empty-actions,
+.next-action-list,
+.demo-guide {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 10px;
 }
 
-.command-followups {
+.command-followups,
+.next-action-list {
   margin-top: 10px;
+}
+
+.demo-guide {
+  color: var(--text);
+}
+
+.demo-guide strong {
+  color: var(--heading);
+}
+
+.demo-guide span {
+  flex: 1 1 320px;
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .answer-card ul {
@@ -619,6 +638,10 @@ label span,
   font-size: 12px;
 }
 
+.chart-panel canvas {
+  width: 100%;
+}
+
 .compare-insights {
   padding: 16px;
   border-bottom: 1px solid var(--line);
@@ -633,6 +656,38 @@ label span,
 .compare-insight-section h4 {
   margin: 0;
   color: var(--heading);
+}
+
+.object-diagnosis {
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+}
+
+.object-diagnosis.danger {
+  border-color: color-mix(in srgb, var(--danger) 36%, var(--line));
+  background: color-mix(in srgb, var(--danger) 9%, var(--panel));
+}
+
+.object-diagnosis.warning {
+  border-color: color-mix(in srgb, var(--warn) 36%, var(--line));
+  background: color-mix(in srgb, var(--warn) 9%, var(--panel));
+}
+
+.object-diagnosis h4 {
+  margin: 0 0 8px;
+  color: var(--heading);
+}
+
+.object-diagnosis ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.object-diagnosis li {
+  margin: 4px 0;
 }
 
 .view-tabs button {

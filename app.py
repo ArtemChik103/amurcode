@@ -70,6 +70,17 @@ TEMPLATES = {
 # Быстрые действия являются контрактом между API и первым экраном UI:
 # каждое действие разворачивается в обычные query/compare параметры.
 QUICK_ACTIONS = {
+    "demo_60s": {
+        "label": "Демо за 60 секунд",
+        "description": "Показать проблемные СКК, главный риск и отчет",
+        "mode": "slice",
+        "template": "skk",
+        "post_filter": "execution_problems",
+        "open_view": "problems",
+        "highlight": "top_risks",
+        "demo_mode": "skk_risks",
+        "metrics": ["limit", "obligation", "cash", "agreement", "contract", "payment", "buau"],
+    },
     "show_skk": {
         "label": "Собрать отчет СКК",
         "description": "Готовая выборка по СКК на выбранную дату",
@@ -922,6 +933,67 @@ def risk_explanation(row: dict) -> list[str]:
     return explanation[:4]
 
 
+def short_object_name(row: dict) -> str:
+    name = str(row.get("object_name") or row.get("object_code") or "Объект без названия")
+    return name if len(name) <= 95 else f"{name[:92]}..."
+
+
+def top_risk_payload(row: dict) -> dict:
+    pipeline = row.get("pipeline") or row_pipeline(row)
+    return {
+        "object_key": row.get("object_key", ""),
+        "object_code": row.get("object_code", ""),
+        "object_name": row.get("object_name") or row.get("object_code") or "Объект без названия",
+        "short_name": short_object_name(row),
+        "budget": row.get("budget", ""),
+        "risk_score": int(row.get("risk_score") or 0),
+        "risk_label": row.get("risk_label") or risk_label(risk_level(int(row.get("risk_score") or 0))),
+        "plan": float(pipeline.get("plan") or 0),
+        "cash": float(pipeline.get("cash") or 0),
+        "documents": float(pipeline.get("documents") or 0),
+        "paid": float(pipeline.get("paid") or 0),
+        "reasons": row.get("risk_explanation") or risk_explanation(row),
+    }
+
+
+def next_actions_payload(mode: str, has_top_risk: bool = False, has_problems: bool = False) -> list[dict]:
+    actions: list[dict] = []
+    if has_top_risk:
+        actions.append({"label": "Открыть главный риск", "action": {"open": "top_risk"}})
+    if mode == "compare":
+        if has_problems:
+            actions.append({"label": "Показать новые проблемы", "action": {"open_view": "changes"}})
+        actions.append({"label": "Скачать Excel", "action": {"download": "excel"}})
+        return actions
+    if has_problems:
+        actions.extend(
+            [
+                {"label": "Показать без кассы", "action": {"post_filter": "no_cash"}},
+                {"label": "Показать без оплат", "action": {"post_filter": "no_payments"}},
+                {"label": "Показать без документов", "action": {"post_filter": "no_documents"}},
+            ]
+        )
+    actions.append({"label": "Скачать Excel", "action": {"download": "excel"}})
+    return actions
+
+
+def object_diagnosis(row: dict) -> dict:
+    reasons = row.get("problem_reasons") or problem_reasons(row)
+    labels = {
+        "no_cash": "Есть план, но кассового исполнения нет.",
+        "no_documents": "Есть план, но документы не найдены.",
+        "no_payments": "Есть документы, но оплат не найдено.",
+        "low_cash": "Касса ниже 25% от плана.",
+        "data_gap": "Данные есть не во всех источниках.",
+    }
+    bullets = [labels[reason] for reason in ("no_cash", "no_documents", "no_payments", "low_cash", "data_gap") if reason in reasons]
+    if not bullets:
+        bullets.append("Явных проблем по цепочке денег не видно.")
+    bullets.append("Проверьте исходные строки и документы перед управленческим решением.")
+    severity = "danger" if any(reason in reasons for reason in ("no_cash", "no_documents", "no_payments")) else "warning" if reasons else "normal"
+    return {"title": "Что проверить", "bullets": bullets, "severity": severity}
+
+
 def row_status_from_reasons(reasons: list[str]) -> str:
     if any(reason in reasons for reason in ("no_documents", "no_payments", "no_cash")):
         return "danger"
@@ -1042,6 +1114,7 @@ def attention_summary(result: dict, template: str, date: str) -> dict:
             "severity": "empty",
             "bullets": ["По выбранным условиям нет объектов для проверки."],
             "top_risks": [],
+            "next_actions": next_actions_payload("slice", False, False),
         }
     counts = {reason: 0 for reason in ("no_cash", "no_payments", "no_documents", "low_cash", "data_gap")}
     for row in rows:
@@ -1080,23 +1153,13 @@ def attention_summary(result: dict, template: str, date: str) -> dict:
     )[:5]
     top_risks = []
     for row in top_rows:
-        pipeline = row.get("pipeline") or row_pipeline(row)
-        top_risks.append(
-            {
-                "object_key": row.get("object_key", ""),
-                "object_name": row.get("object_name") or row.get("object_code") or "Объект без названия",
-                "risk_score": int(row.get("risk_score") or 0),
-                "risk_label": row.get("risk_label") or risk_label(risk_level(int(row.get("risk_score") or 0))),
-                "plan": float(pipeline.get("plan") or 0),
-                "cash": float(pipeline.get("cash") or 0),
-                "reasons": row.get("risk_explanation") or risk_explanation(row),
-            }
-        )
+        top_risks.append(top_risk_payload(row))
     return {
         "title": "Что требует внимания",
         "severity": severity,
         "bullets": bullets[:5],
         "top_risks": top_risks,
+        "next_actions": next_actions_payload("slice", bool(top_risks), has_problems),
     }
 
 
@@ -1782,6 +1845,7 @@ def object_detail(params: dict[str, list[str]]) -> dict:
         "risk_level": row.get("risk_level", "low"),
         "risk_label": row.get("risk_label", risk_label("low")),
         "risk_explanation": row.get("risk_explanation", []),
+        "diagnosis": object_diagnosis(row),
         "pipeline": row.get("pipeline", {}),
         "sources": [source.strip() for source in str(row.get("sources", "")).split(",") if source.strip()],
         "documents": documents[:100],
@@ -1793,7 +1857,7 @@ def export_excel(params: dict[str, list[str]]) -> tuple[bytes, str]:
     """Формирует рабочий Excel: выводы, итоги, объекты, проблемы и методику."""
     try:
         from openpyxl import Workbook
-        from openpyxl.styles import Font
+        from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     except ImportError as exc:
         raise RuntimeError("excel_dependency_missing") from exc
 
@@ -1819,39 +1883,44 @@ def export_excel(params: dict[str, list[str]]) -> tuple[bytes, str]:
     ws.title = "Выводы"
     pipeline = row_pipeline(totals)
     problem_count = sum(1 for row in rows if row.get("problem_reasons"))
-    ws.append(["Отчет", TEMPLATES.get(template, TEMPLATES["all"])["label"]])
-    ws.append(["Дата отчета", date_label])
-    ws.append(["Готовый отчет", TEMPLATES.get(template, TEMPLATES["all"])["label"]])
-    ws.append(["Общий статус", summary.get("severity", "")])
+    report_created = datetime.now().strftime("%Y-%m-%d %H:%M")
+    ws.append(["Аналитика расходов"])
+    ws.append([f"Период: {date_label}", f"Шаблон: {TEMPLATES.get(template, TEMPLATES['all'])['label']}", f"Сформировано: {report_created}"])
     ws.append([])
     ws.append(["Что требует внимания"])
     for bullet in summary.get("bullets") or []:
         ws.append([bullet])
     top_risks = summary.get("top_risks") or summary.get("new_problem_objects") or summary.get("worsened_objects") or []
     ws.append([])
-    ws.append(["Топ-5 рисков"])
-    ws.append(["Объект", "Риск", "План", "Касса", "Причины"])
+    ws.append(["Главные риски"])
+    ws.append(["Объект", "Код", "Бюджет", "Риск", "План", "Касса", "Причины"])
     for item in top_risks[:5]:
         ws.append([
-            item.get("object_name", ""),
+            item.get("short_name") or item.get("object_name", ""),
+            item.get("object_code", ""),
+            item.get("budget", ""),
             f"{item.get('risk_label', '')} {item.get('risk_score', '')}".strip(),
             item.get("plan", 0),
             item.get("cash", 0),
             ", ".join(item.get("reasons") or []),
         ])
+    ws.append([])
+    ws.append(["Следующие действия"])
+    for item in ("Открыть карточку объекта в системе", "Проверить исходные строки", "Уточнить документы/оплаты"):
+        ws.append([item])
 
     ws = wb.create_sheet("Итоги")
     summary_rows = [
-        ("Дата отчета", date_label),
-        ("Готовый отчет", TEMPLATES.get(template, TEMPLATES["all"])["label"]),
-        ("Найдено объектов", len(rows)),
-        ("План", pipeline["plan"]),
-        ("Документы", pipeline["documents"]),
-        ("Оплачено", pipeline["paid"]),
-        ("Касса", pipeline["cash"]),
-        ("Проблемных объектов", problem_count),
+        ("Лимиты", totals.get("limit", 0), "Доведенные бюджетные лимиты."),
+        ("БО", totals.get("obligation", 0), "Принятые бюджетные обязательства."),
+        ("Касса", totals.get("cash", 0), "Кассовое исполнение по РЧБ."),
+        ("Соглашения", totals.get("agreement", 0), "Суммы соглашений."),
+        ("Контракты", totals.get("contract", 0), "Суммы контрактов и договоров."),
+        ("Платежи", totals.get("payment", 0), "Фактические платежи."),
+        ("БУ/АУ", totals.get("buau", 0), "Выплаты учреждений."),
+        ("Проблемных объектов", problem_count, "Строки с явными причинами риска."),
     ]
-    ws.append(["Показатель", "Значение"])
+    ws.append(["Показатель", "Значение", "Пояснение"])
     for item in summary_rows:
         ws.append(list(item))
 
@@ -1875,7 +1944,14 @@ def export_excel(params: dict[str, list[str]]) -> tuple[bytes, str]:
         ])
 
     problems_ws = wb.create_sheet("Проблемы")
-    problems_ws.append(["Причина", "Риск", "Балл риска", "Объект", "Код", "План", "Документы", "Оплачено", "Касса", "Источники"])
+    problems_ws.append(["Причина", "Причина текстом", "Риск", "Балл риска", "Объект", "Код", "План", "Документы", "Оплачено", "Касса", "Источники"])
+    reason_labels = {
+        "no_documents": "Есть план, но документы не найдены",
+        "no_payments": "Есть документы, но оплат не найдено",
+        "no_cash": "Есть план, но кассового исполнения нет",
+        "low_cash": "Касса ниже 25% от плана",
+        "data_gap": "Данные есть не во всех источниках",
+    }
     problem_rows = sorted(
         [row for row in rows if row.get("problem_reasons")],
         key=lambda item: (int(item.get("risk_score") or 0), float((item.get("pipeline") or row_pipeline(item)).get("plan") or 0)),
@@ -1886,6 +1962,7 @@ def export_excel(params: dict[str, list[str]]) -> tuple[bytes, str]:
         for reason in row.get("problem_reasons") or []:
             problems_ws.append([
                 reason,
+                reason_labels.get(reason, "Проблема данных"),
                 row.get("risk_label", ""),
                 row.get("risk_score", 0),
                 row.get("object_name", ""),
@@ -1921,12 +1998,63 @@ def export_excel(params: dict[str, list[str]]) -> tuple[bytes, str]:
         "Документы = соглашения + контракты.",
         "Оплачено = платежи + БУАУ.",
         "Касса = кассовые выплаты из РЧБ.",
+        "Риск является управленческим индикатором для проверки и не является юридическим выводом.",
     ):
         method_ws.append([line])
 
+    header_fill = PatternFill("solid", fgColor="1F4E78")
+    header_font = Font(bold=True, color="FFFFFF")
+    title_font = Font(bold=True, size=16, color="1F4E78")
+    section_fill = PatternFill("solid", fgColor="D9EAF7")
+    risk_fills = {
+        "critical": PatternFill("solid", fgColor="F4CCCC"),
+        "high": PatternFill("solid", fgColor="FCE4D6"),
+        "medium": PatternFill("solid", fgColor="FFF2CC"),
+    }
+    thin_border = Border(
+        left=Side(style="thin", color="D9E0E4"),
+        right=Side(style="thin", color="D9E0E4"),
+        top=Side(style="thin", color="D9E0E4"),
+        bottom=Side(style="thin", color="D9E0E4"),
+    )
+    money_headers = {"Значение", "План", "Документы", "Оплачено", "Касса", "Сумма"}
+    table_sheets = {"Итоги", "Объекты", "Проблемы", "Исходные строки"}
+
+    ws = wb["Выводы"]
+    ws.freeze_panes = "A4"
+    ws["A1"].font = title_font
+    for row_number in (4, 4 + len(summary.get("bullets") or []) + 2, ws.max_row - 3):
+        for cell in ws[row_number]:
+            cell.fill = section_fill
+            cell.font = Font(bold=True, color="1F4E78")
+
     for sheet in wb.worksheets:
-        for cell in sheet[1]:
-            cell.font = Font(bold=True)
+        if sheet.title in table_sheets:
+            sheet.freeze_panes = "A2"
+            sheet.auto_filter.ref = sheet.dimensions
+        if sheet.title != "Выводы":
+            for cell in sheet[1]:
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
+        header_values = [cell.value for cell in sheet[1]]
+        money_columns = {index + 1 for index, value in enumerate(header_values) if value in money_headers}
+        for row in sheet.iter_rows():
+            row_risk_level = ""
+            if sheet.title == "Объекты":
+                score = int(row[9].value or 0) if len(row) > 9 and isinstance(row[9].value, (int, float)) else 0
+                row_risk_level = risk_level(score)
+            elif sheet.title == "Проблемы":
+                score = int(row[3].value or 0) if len(row) > 3 and isinstance(row[3].value, (int, float)) else 0
+                row_risk_level = risk_level(score)
+            fill = next((risk_fills[level] for level in risk_fills if level in row_risk_level), None)
+            for cell in row:
+                cell.border = thin_border
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
+                if cell.column in money_columns and isinstance(cell.value, (int, float)):
+                    cell.number_format = "#,##0"
+                if fill and cell.row > 1:
+                    cell.fill = fill
         for column in sheet.columns:
             width = min(55, max(12, *(len(str(cell.value or "")) + 2 for cell in column)))
             sheet.column_dimensions[column[0].column_letter].width = width
@@ -1952,6 +2080,8 @@ def compare_object_summary(row: dict, risk_value: int | None = None, base_row: d
         "risk_label": risk_label(risk_level(score)),
         "plan": float(pipeline.get("plan") or 0),
         "cash": float(pipeline.get("cash") or 0),
+        "documents": float(pipeline.get("documents") or 0),
+        "paid": float(pipeline.get("paid") or 0),
         "reasons": row.get("risk_explanation") or risk_explanation(row),
     }
     if base_row is not None:
@@ -2026,6 +2156,7 @@ def compare_insights(base_rows: list[dict], target_rows: list[dict]) -> dict:
         "worsened_objects": worsened_objects,
         "improved_objects": improved_objects,
         "stalled_cash_objects": stalled_cash_objects,
+        "next_actions": next_actions_payload("compare", bool(new_problem_objects or worsened_objects), bool(new_problem_objects)),
     }
 
 

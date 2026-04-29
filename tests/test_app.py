@@ -140,6 +140,13 @@ class DataLoadTests(unittest.TestCase):
             self.assertIn(code, app.QUICK_ACTIONS)
             self.assertIn("metrics", app.QUICK_ACTIONS[code])
 
+    def test_demo_quick_action_is_first_and_uses_skk_problem_flow(self):
+        first = app.quick_actions_payload()[0]
+        self.assertEqual(first["code"], "demo_60s")
+        self.assertEqual(first["template"], "skk")
+        self.assertEqual(first["post_filter"], "execution_problems")
+        self.assertEqual(first["open_view"], "problems")
+
     def test_low_execution_post_filter_keeps_problem_rows_only(self):
         metrics = ["limit", "cash", "payment", "buau"]
         result = app.aggregate(self.store.records, metrics)
@@ -205,6 +212,19 @@ class DataLoadTests(unittest.TestCase):
         self.assertIn("object_key", row)
         self.assertIn("match_confidence", row)
 
+    def test_attention_summary_includes_next_actions(self):
+        result = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"]})
+        actions = result["attention_summary"]["next_actions"]
+        self.assertTrue(actions)
+        self.assertIn("Скачать Excel", [item["label"] for item in actions])
+
+    def test_top_risks_include_short_fields(self):
+        result = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"], "post_filter": ["execution_problems"]})
+        top = result["attention_summary"]["top_risks"][0]
+        self.assertIn("short_name", top)
+        self.assertIn("object_code", top)
+        self.assertIn("budget", top)
+
     def test_risk_score_and_level_are_added_to_rows(self):
         result = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"]})
         row = result["rows"][0]
@@ -254,6 +274,13 @@ class DataLoadTests(unittest.TestCase):
         detail = app.object_detail({"date": ["2026-04-01"], "template": ["skk"], "object_key": [key]})
         self.assertIn("risk_score", detail)
         self.assertIn("risk_label", detail)
+
+    def test_object_detail_includes_diagnosis(self):
+        query = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"], "post_filter": ["execution_problems"]})
+        key = query["rows"][0]["object_key"]
+        detail = app.object_detail({"date": ["2026-04-01"], "template": ["skk"], "object_key": [key]})
+        self.assertEqual(detail["diagnosis"]["title"], "Что проверить")
+        self.assertTrue(detail["diagnosis"]["bullets"])
 
     def test_readiness_summary_returns_checks(self):
         payload = app.readiness_response({"date": ["2026-04-01"], "template": ["skk"]})
@@ -466,6 +493,18 @@ class HttpTests(unittest.TestCase):
         self.assertIn("Выводы", workbook.sheetnames)
         method_text = "\n".join(str(row[0] or "") for row in workbook["Методика"].iter_rows(values_only=True))
         self.assertIn("последний месячный срез", method_text)
+
+    def test_excel_export_has_formatting(self):
+        content, _ = app.export_excel({"date": ["2026-04-01"], "template": ["skk"]})
+        workbook = load_workbook(BytesIO(content))
+        self.assertEqual(workbook.sheetnames, ["Выводы", "Итоги", "Объекты", "Проблемы", "Исходные строки", "Методика"])
+        self.assertEqual(workbook["Выводы"].freeze_panes, "A4")
+        self.assertEqual(workbook["Итоги"].freeze_panes, "A2")
+        self.assertTrue(workbook["Объекты"].auto_filter.ref)
+        self.assertTrue(workbook["Итоги"]["A1"].font.bold)
+        self.assertEqual(workbook["Итоги"]["A1"].font.color.rgb, "00FFFFFF")
+        выводы = "\n".join(str(row[0] or "") for row in workbook["Выводы"].iter_rows(values_only=True))
+        self.assertIn("Следующие действия", выводы)
 
     def test_assistant_endpoint_returns_rule_based_json_without_groq(self):
         old_key = os.environ.pop("GROQ_API_KEY", None)
