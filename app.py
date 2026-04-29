@@ -2606,10 +2606,11 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 def main() -> None:
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    port = int(os.environ.get("PORT") or (sys.argv[1] if len(sys.argv) > 1 else 8000))
+    host = os.environ.get("HOST", "0.0.0.0")
+    server = ThreadingHTTPServer((host, port), Handler)
     print(f"Loaded {STORE.meta['records']} records from {DATA_DIR}")
-    print(f"Open http://127.0.0.1:{port}")
+    print(f"Open http://{host}:{port}")
     server.serve_forever()
 
 
