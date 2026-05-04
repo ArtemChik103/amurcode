@@ -3,6 +3,7 @@ import os
 import tempfile
 import threading
 import unittest
+from decimal import Decimal
 from io import BytesIO
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
@@ -21,6 +22,14 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(app.parse_amount("10000000.00"), 10000000.0)
         self.assertEqual(app.parse_amount(""), 0.0)
         self.assertEqual(app.parse_amount(None), 0.0)
+
+    def test_json_safe_converts_decimal(self):
+        payload = app.json_safe({"amount": Decimal("10.125"), "rows": [Decimal("0.10")]})
+        self.assertEqual(payload, {"amount": 10.13, "rows": [0.1]})
+        self.assertIsInstance(payload["amount"], float)
+
+    def test_decimal_money_sum_avoids_float_artifact(self):
+        self.assertEqual(app.money_sum([Decimal("0.10"), Decimal("0.20")]), Decimal("0.30"))
 
     def test_parse_date_normalizes_known_input_formats(self):
         self.assertEqual(app.parse_date("20.08.2025"), "2025-08-20")
@@ -510,6 +519,8 @@ class HttpTests(unittest.TestCase):
         self.assertGreater(payload["count"], 0)
         self.assertTrue(payload["rows"])
         self.assertTrue(all("РЧБ" in row["sources"] for row in payload["rows"]))
+        self.assertTrue(all(isinstance(value, (int, float)) for value in payload["totals"].values()))
+        self.assertTrue(all(not isinstance(value, str) for value in payload["totals"].values()))
 
     def test_static_index_is_served(self):
         status, content_type, body = self.request("/")

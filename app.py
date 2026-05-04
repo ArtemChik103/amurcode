@@ -16,6 +16,7 @@ from io import BytesIO
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -31,6 +32,7 @@ STATIC_DIR = ROOT / "static"
 RAG_DIR = ROOT / "docs" / "rag"
 QUALITY_ISSUES: list[dict] = []
 LOAD_STATS: dict[str, dict[str, int]] = {}
+MONEY_ZERO = Decimal("0.00")
 
 
 def load_local_env(path: Path = ROOT / ".env") -> None:
@@ -309,21 +311,23 @@ def reviews_payload() -> dict:
     return {key: review_for_object(key) for key in load_reviews()}
 
 
-def parse_amount(value: object, source_file: str = "", source_row: int | str = "", field: str = "") -> float:
-    """Разбирает суммы из русских CSV и машинных выгрузок в общий float."""
+def parse_money(value: object, source_file: str = "", source_row: int | str = "", field: str = "") -> Decimal:
+    """Разбирает суммы из русских CSV и машинных выгрузок в Decimal."""
     if value is None:
-        return 0.0
+        return MONEY_ZERO
+    if isinstance(value, Decimal):
+        return value
     text = str(value).strip().replace("\xa0", " ")
     if not text:
-        return 0.0
+        return MONEY_ZERO
     text = text.replace(" ", "")
     if "," in text and "." in text:
         text = text.replace(",", "")
     elif "," in text:
         text = text.replace(",", ".")
     try:
-        return float(text)
-    except ValueError:
+        return Decimal(text)
+    except (InvalidOperation, ValueError):
         if source_file or field:
             add_quality_issue(
                 source_file,
@@ -334,7 +338,35 @@ def parse_amount(value: object, source_file: str = "", source_row: int | str = "
                 field,
                 value,
             )
-        return 0.0
+        return MONEY_ZERO
+
+
+def money_to_json(value: Decimal) -> float:
+    return float(value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
+def money_sum(values) -> Decimal:
+    total = MONEY_ZERO
+    for value in values:
+        total += parse_money(value)
+    return total
+
+
+def json_safe(value: object) -> object:
+    if isinstance(value, Decimal):
+        return money_to_json(value)
+    if isinstance(value, dict):
+        return {key: json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [json_safe(item) for item in value]
+    return value
+
+
+def parse_amount(value: object, source_file: str = "", source_row: int | str = "", field: str = "") -> float:
+    """Compatibility wrapper: старый API возвращает float."""
+    return float(parse_money(value, source_file, source_row, field))
 
 
 def parse_date(value: object, source_file: str = "", source_row: int | str = "", field: str = "") -> str:
@@ -399,6 +431,8 @@ def make_record(records: list[dict], source_file: str, source_row: int, raw: dic
         "raw": dict(raw),
     }
     record.update(fields)
+    for metric in METRIC_KEYS:
+        record[metric] = parse_money(record.get(metric))
     return record
 
 
@@ -583,10 +617,10 @@ def control_summary(params: dict[str, list[str]] | None = None) -> dict:
         key = record.get("object_key") or object_group_key(record)
         object_sources[key].add(source)
 
-        amount = sum(float(record.get(metric) or 0.0) for metric in METRIC_KEYS)
+        amount = money_sum(record.get(metric) for metric in METRIC_KEYS)
         source_item = source_groups.setdefault(
             source,
-            {"source": source, "read_rows": 0, "records": 0, "warnings": 0, "errors": 0, "total_amount": 0.0, "files": set()},
+            {"source": source, "read_rows": 0, "records": 0, "warnings": 0, "errors": 0, "total_amount": MONEY_ZERO, "files": set()},
         )
         source_item["records"] += 1
         source_item["read_rows"] += 1
@@ -634,7 +668,7 @@ def control_summary(params: dict[str, list[str]] | None = None) -> dict:
     for item in source_groups.values():
         files = sorted(item.pop("files"))
         item["files"] = files
-        item["total_amount"] = round(float(item["total_amount"]), 2)
+        item["total_amount"] = item["total_amount"].quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         sources.append(item)
     sources.sort(key=lambda item: item["source"])
     load_files.sort(key=lambda item: item["source_file"])
@@ -725,13 +759,13 @@ def load_rcb(records: list[dict]) -> None:
                     counterparty=item.get("Наименование КВСР", "").strip(),
                     document_number="",
                     description=item.get("Наименование КВР", "").strip(),
-                    limit=parse_amount(find_header_value(item, "Лимиты ПБС"), source_file, row_number, "Лимиты ПБС"),
-                    obligation=parse_amount(find_header_value(item, "Подтв. лимитов по БО"), source_file, row_number, "Подтв. лимитов по БО"),
-                    cash=parse_amount(find_header_value(item, "Всего выбытий"), source_file, row_number, "Всего выбытий"),
-                    agreement=0.0,
-                    contract=0.0,
-                    payment=0.0,
-                    buau=0.0,
+                    limit=parse_money(find_header_value(item, "Лимиты ПБС"), source_file, row_number, "Лимиты ПБС"),
+                    obligation=parse_money(find_header_value(item, "Подтв. лимитов по БО"), source_file, row_number, "Подтв. лимитов по БО"),
+                    cash=parse_money(find_header_value(item, "Всего выбытий"), source_file, row_number, "Всего выбытий"),
+                    agreement=MONEY_ZERO,
+                    contract=MONEY_ZERO,
+                    payment=MONEY_ZERO,
+                    buau=MONEY_ZERO,
                 )
             )
 
@@ -777,13 +811,13 @@ def load_agreements(records: list[dict]) -> None:
                         counterparty=recipient,
                         document_number=(row.get("reg_number") or "").strip(),
                         description=class_names.get(str(row.get("documentclass_id")), "Соглашение"),
-                        limit=0.0,
-                        obligation=0.0,
-                        cash=0.0,
-                        agreement=parse_amount(row.get("amount_1year")),
-                        contract=0.0,
-                        payment=0.0,
-                        buau=0.0,
+                        limit=MONEY_ZERO,
+                        obligation=MONEY_ZERO,
+                        cash=MONEY_ZERO,
+                        agreement=parse_money(row.get("amount_1year")),
+                        contract=MONEY_ZERO,
+                        payment=MONEY_ZERO,
+                        buau=MONEY_ZERO,
                     )
                 )
 
@@ -834,13 +868,13 @@ def load_state_task(records: list[dict]) -> None:
                             counterparty=(row.get("zakazchik_key") or "").strip(),
                             document_number=(row.get("con_number") or "").strip(),
                             description="Контракт/договор",
-                            limit=0.0,
-                            obligation=0.0,
-                            cash=0.0,
-                            agreement=0.0,
-                            contract=parse_amount(row.get("con_amount")),
-                            payment=0.0,
-                            buau=0.0,
+                            limit=MONEY_ZERO,
+                            obligation=MONEY_ZERO,
+                            cash=MONEY_ZERO,
+                            agreement=MONEY_ZERO,
+                            contract=parse_money(row.get("con_amount")),
+                            payment=MONEY_ZERO,
+                            buau=MONEY_ZERO,
                         )
                     )
 
@@ -877,13 +911,13 @@ def load_state_task(records: list[dict]) -> None:
                             counterparty=(contract.get("zakazchik_key") or "").strip(),
                             document_number=(row.get("platezhka_num") or "").strip(),
                             description="Оплата по контракту",
-                            limit=0.0,
-                            obligation=0.0,
-                            cash=0.0,
-                            agreement=0.0,
-                            contract=0.0,
-                            payment=parse_amount(row.get("platezhka_amount")),
-                            buau=0.0,
+                            limit=MONEY_ZERO,
+                            obligation=MONEY_ZERO,
+                            cash=MONEY_ZERO,
+                            agreement=MONEY_ZERO,
+                            contract=MONEY_ZERO,
+                            payment=parse_money(row.get("platezhka_amount")),
+                            buau=MONEY_ZERO,
                         )
                     )
 
@@ -923,13 +957,13 @@ def load_buau(records: list[dict]) -> None:
                         counterparty=organization,
                         document_number="",
                         description=(row.get("Орган, предоставляющий субсидии") or "").strip(),
-                        limit=0.0,
-                        obligation=0.0,
-                        cash=0.0,
-                        agreement=0.0,
-                        contract=0.0,
-                        payment=0.0,
-                        buau=parse_amount(row.get("Выплаты с учетом возврата")),
+                        limit=MONEY_ZERO,
+                        obligation=MONEY_ZERO,
+                        cash=MONEY_ZERO,
+                        agreement=MONEY_ZERO,
+                        contract=MONEY_ZERO,
+                        payment=MONEY_ZERO,
+                        buau=parse_money(row.get("Выплаты с учетом возврата")),
                     )
                 )
 
@@ -1007,16 +1041,16 @@ def select_as_of(records: list[dict], date: str, params: dict[str, list[str]]) -
     return apply_filters(selected, filter_params)
 
 
-def percent_or_none(numerator: float, denominator: float) -> float | None:
-    return numerator / denominator if denominator else None
+def percent_or_none(numerator: Decimal, denominator: Decimal) -> float | None:
+    return float(numerator / denominator) if denominator else None
 
 
 def row_pipeline(row: dict) -> dict:
     """Сводит метрики объекта в управленческую цепочку план-документы-оплаты-касса."""
-    plan = float(row.get("limit") or 0) + float(row.get("obligation") or 0)
-    documents = float(row.get("agreement") or 0) + float(row.get("contract") or 0)
-    paid = float(row.get("payment") or 0) + float(row.get("buau") or 0)
-    cash = float(row.get("cash") or 0)
+    plan = money_sum([row.get("limit"), row.get("obligation")])
+    documents = money_sum([row.get("agreement"), row.get("contract")])
+    paid = money_sum([row.get("payment"), row.get("buau")])
+    cash = parse_money(row.get("cash"))
     missing_steps = []
     if plan > 0 and documents == 0:
         missing_steps.append("documents")
@@ -1238,10 +1272,10 @@ def row_status_from_reasons(reasons: list[str]) -> str:
 def aggregate(records: list[dict], metrics: list[str] | None = None) -> dict:
     """Группирует нормализованные строки в таблицу объектов и totals для UI."""
     groups: dict[str, dict] = {}
-    timeline: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    timeline: dict[str, dict[str, Decimal]] = defaultdict(lambda: defaultdict(lambda: MONEY_ZERO))
     metric_keys = metrics or list(METRIC_KEYS)
 
-    totals = {key: 0.0 for key in metric_keys}
+    totals = {key: MONEY_ZERO for key in metric_keys}
     for record in records:
         key = record.get("object_key") or object_group_key(record)
         row = groups.setdefault(
@@ -1253,7 +1287,7 @@ def aggregate(records: list[dict], metrics: list[str] | None = None) -> dict:
                 "budget": record.get("budget") or "",
                 "object_aliases": set(),
                 "sources": set(),
-                **{metric: 0.0 for metric in METRIC_KEYS},
+                **{metric: MONEY_ZERO for metric in METRIC_KEYS},
             },
         )
         if not row["object_code"] and record.get("object_code"):
@@ -1269,7 +1303,7 @@ def aggregate(records: list[dict], metrics: list[str] | None = None) -> dict:
         row["sources"].add(record["source"])
         point = record.get("snapshot") or record.get("event_date") or "unknown"
         for metric in METRIC_KEYS:
-            value = float(record.get(metric) or 0.0)
+            value = parse_money(record.get(metric))
             row[metric] += value
             if metric in metric_keys:
                 totals[metric] += value
@@ -1291,14 +1325,14 @@ def aggregate(records: list[dict], metrics: list[str] | None = None) -> dict:
         row["risk_label"] = row["risk_breakdown"]["label"]
         row["risk_explanation"] = risk_explanation(row)
         row["review"] = review_for_object(row["object_key"])
-        row["total"] = sum(row[metric] for metric in metric_keys)
+        row["total"] = money_sum(row[metric] for metric in metric_keys)
         rows.append(row)
     rows.sort(key=lambda item: item["total"], reverse=True)
 
     timeline_rows = []
     for date in sorted(timeline):
         point = {"date": date}
-        point.update({metric: timeline[date].get(metric, 0.0) for metric in metric_keys})
+        point.update({metric: timeline[date].get(metric, MONEY_ZERO) for metric in metric_keys})
         timeline_rows.append(point)
 
     return {
@@ -1325,8 +1359,8 @@ def apply_aggregate_post_filter(result: dict, post_filter: str, metrics: list[st
         elif selected == "execution_problems" and reasons:
             rows.append(row)
         elif selected == "low_execution":
-            plan = float(row.get("limit") or 0) + float(row.get("obligation") or 0)
-            execution = float(row.get("cash") or 0) + float(row.get("payment") or 0) + float(row.get("buau") or 0)
+            plan = money_sum([row.get("limit"), row.get("obligation")])
+            execution = money_sum([row.get("cash"), row.get("payment"), row.get("buau")])
             if plan > 0 and (execution == 0 or execution / plan < 0.25):
                 rows.append(row)
         elif selected in reasons:
@@ -1337,7 +1371,7 @@ def apply_aggregate_post_filter(result: dict, post_filter: str, metrics: list[st
         key=lambda item: (int(item.get("risk_score") or 0), float((item.get("pipeline") or row_pipeline(item)).get("plan") or 0)),
         reverse=True,
     )
-    filtered["totals"] = {metric: sum(float(row.get(metric) or 0) for row in rows) for metric in metrics}
+    filtered["totals"] = {metric: money_sum(row.get(metric) for row in rows) for metric in metrics}
     filtered["count"] = len(rows)
     return filtered
 
@@ -1358,9 +1392,9 @@ def attention_summary(result: dict, template: str, date: str) -> dict:
         for reason in row.get("problem_reasons") or []:
             if reason in counts:
                 counts[reason] += 1
-    plan_total = sum(float((row.get("pipeline") or row_pipeline(row)).get("plan") or 0) for row in rows)
-    cash_total = sum(float((row.get("pipeline") or row_pipeline(row)).get("cash") or 0) for row in rows)
-    cash_percent = cash_total / plan_total * 100.0 if plan_total > 0 else None
+    plan_total = money_sum((row.get("pipeline") or row_pipeline(row)).get("plan") for row in rows)
+    cash_total = money_sum((row.get("pipeline") or row_pipeline(row)).get("cash") for row in rows)
+    cash_percent = float(cash_total / plan_total * Decimal("100.0")) if plan_total > 0 else None
     has_critical = any(row.get("risk_level") == "critical" for row in rows)
     has_problems = any(row.get("problem_reasons") for row in rows)
     if has_critical or (cash_percent is not None and cash_percent < 10):
@@ -1747,7 +1781,7 @@ def assistant_llm(message: str, context: dict, rag_context: str) -> dict:
     }
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+        {"role": "user", "content": json.dumps(json_safe(user_payload), ensure_ascii=False)},
     ]
     schema_format = {
         "type": "json_schema",
@@ -1860,7 +1894,7 @@ def explain_llm(kind: str, payload: dict) -> dict:
             "role": "system",
             "content": "Объясни результат простыми словами. Не считай суммы, не проси raw records, верни только JSON по schema.",
         },
-        {"role": "user", "content": json.dumps(allowed_payload, ensure_ascii=False)},
+        {"role": "user", "content": json.dumps(json_safe(allowed_payload), ensure_ascii=False)},
     ]
     parsed = groq_chat_completion(
         model,
@@ -1907,7 +1941,7 @@ def trace_record(record_id: str) -> dict | None:
                 ("payment", "Оплаты"),
                 ("buau", "БУ/АУ"),
             ):
-                value = float(record.get(key) or 0)
+                value = parse_money(record.get(key))
                 if value:
                     amount_fields.append({"label": label, "field": key, "value": value})
             return {
@@ -2026,7 +2060,7 @@ def as_of_timeline(date: str, params: dict[str, list[str]], metrics: list[str]) 
         result = aggregate(records, metrics)
         result = apply_aggregate_post_filter(result, post_filter, metrics)
         point = {"date": point_date}
-        point.update({metric: result["totals"].get(metric, 0.0) for metric in metrics})
+        point.update({metric: result["totals"].get(metric, MONEY_ZERO) for metric in metrics})
         points.append(point)
     return points
 
@@ -2061,7 +2095,7 @@ def object_detail(params: dict[str, list[str]]) -> dict:
     documents = []
     for record in records:
         if record.get("source") in {"Соглашения", "ГЗ: контракты", "ГЗ: платежи", "БУАУ"}:
-            amount = sum(float(record.get(metric) or 0) for metric in ("agreement", "contract", "payment", "buau"))
+            amount = money_sum(record.get(metric) for metric in ("agreement", "contract", "payment", "buau"))
             documents.append(
                 {
                     "source": record.get("source", ""),
@@ -2107,7 +2141,7 @@ def export_excel(params: dict[str, list[str]]) -> tuple[bytes, str]:
         rows = result["rows"]
         details: list[dict] = []
         date_label = f"{result['base']} - {result['target']}"
-        totals = {metric: sum(float(row.get("metrics", {}).get(metric, {}).get("target") or 0) for row in rows) for metric in selected_metrics(params)}
+        totals = {metric: money_sum(row.get("metrics", {}).get(metric, {}).get("target") for row in rows) for metric in selected_metrics(params)}
         summary = result.get("compare_insights") or {"title": "Что изменилось", "severity": "normal", "bullets": [], "top_risks": []}
     else:
         result = query_as_of(params)
@@ -2226,7 +2260,7 @@ def export_excel(params: dict[str, list[str]]) -> tuple[bytes, str]:
     details_ws = wb.create_sheet("Исходные строки")
     details_ws.append(["Дата", "Источник", "Файл", "Строка", "Код", "Объект", "Документ", "Контрагент", "Сумма"])
     for record in details:
-        amount = sum(float(record.get(metric) or 0) for metric in METRIC_KEYS)
+        amount = money_sum(record.get(metric) for metric in METRIC_KEYS)
         details_ws.append([
             record.get("event_date") or record.get("snapshot") or "",
             record.get("source", ""),
@@ -2438,7 +2472,7 @@ def export_pdf(params: dict[str, list[str]]) -> tuple[bytes, str]:
         summary = result["compare_insights"]
         date_label = f"{result['base']} - {result['target']}"
         metrics = selected_metrics(params)
-        totals = {metric: sum(float(row.get("metrics", {}).get(metric, {}).get("target") or 0) for row in rows) for metric in metrics}
+        totals = {metric: money_sum(row.get("metrics", {}).get(metric, {}).get("target") for row in rows) for metric in metrics}
         change_items = (
             list(summary.get("new_problem_objects") or [])
             + list(summary.get("worsened_objects") or [])
@@ -2615,10 +2649,10 @@ def export_pdf(params: dict[str, list[str]]) -> tuple[bytes, str]:
         if mode == "compare":
             metrics = row.get("metrics", {})
             row_pipeline_data = {
-                "plan": float(metrics.get("limit", {}).get("target") or 0) + float(metrics.get("obligation", {}).get("target") or 0),
-                "documents": float(metrics.get("agreement", {}).get("target") or 0) + float(metrics.get("contract", {}).get("target") or 0),
-                "paid": float(metrics.get("payment", {}).get("target") or 0) + float(metrics.get("buau", {}).get("target") or 0),
-                "cash": float(metrics.get("cash", {}).get("target") or 0),
+                "plan": money_sum([metrics.get("limit", {}).get("target"), metrics.get("obligation", {}).get("target")]),
+                "documents": money_sum([metrics.get("agreement", {}).get("target"), metrics.get("contract", {}).get("target")]),
+                "paid": money_sum([metrics.get("payment", {}).get("target"), metrics.get("buau", {}).get("target")]),
+                "cash": parse_money(metrics.get("cash", {}).get("target")),
             }
             risk_text = str(row.get("risk", {}).get("target") or 0)
         else:
@@ -2676,8 +2710,8 @@ def compare_object_summary(row: dict, risk_value: int | None = None, base_row: d
     if base_row is not None:
         base_pipeline = base_row.get("pipeline") or row_pipeline(base_row)
         payload["risk_delta"] = score - int(base_row.get("risk_score") or 0)
-        payload["plan_delta"] = float(pipeline.get("plan") or 0) - float(base_pipeline.get("plan") or 0)
-        payload["cash_delta"] = float(pipeline.get("cash") or 0) - float(base_pipeline.get("cash") or 0)
+        payload["plan_delta"] = parse_money(pipeline.get("plan")) - parse_money(base_pipeline.get("plan"))
+        payload["cash_delta"] = parse_money(pipeline.get("cash")) - parse_money(base_pipeline.get("cash"))
     return payload
 
 
@@ -2706,7 +2740,7 @@ def compare_insights(base_rows: list[dict], target_rows: list[dict]) -> dict:
             worsened_objects.append(compare_object_summary(display_row, target_score, base_row if key in base_by_key else None))
         if base_score - target_score >= 20:
             improved_objects.append(compare_object_summary(display_row, target_score, base_row if key in base_by_key else None))
-        if float(target_pipeline.get("plan") or 0) > float(base_pipeline.get("plan") or 0) and float(target_pipeline.get("cash") or 0) == float(base_pipeline.get("cash") or 0):
+        if parse_money(target_pipeline.get("plan")) > parse_money(base_pipeline.get("plan")) and parse_money(target_pipeline.get("cash")) == parse_money(base_pipeline.get("cash")):
             stalled_cash_objects.append(compare_object_summary(display_row, target_score, base_row if key in base_by_key else None))
 
     sort_key = lambda item: (int(item.get("risk_score") or 0), float(item.get("plan") or 0))
@@ -2716,8 +2750,8 @@ def compare_insights(base_rows: list[dict], target_rows: list[dict]) -> dict:
     improved_objects = sorted(improved_objects, key=lambda item: (abs(int(item.get("risk_delta") or 0)), float(item.get("plan") or 0)), reverse=True)[:10]
     stalled_cash_objects = sorted(stalled_cash_objects, key=lambda item: float(item.get("plan_delta") or 0), reverse=True)[:10]
 
-    base_cash = sum(float((row.get("pipeline") or row_pipeline(row)).get("cash") or 0) for row in base_rows)
-    target_cash = sum(float((row.get("pipeline") or row_pipeline(row)).get("cash") or 0) for row in target_rows)
+    base_cash = money_sum((row.get("pipeline") or row_pipeline(row)).get("cash") for row in base_rows)
+    target_cash = money_sum((row.get("pipeline") or row_pipeline(row)).get("cash") for row in target_rows)
     cash_delta = target_cash - base_cash
     bullets = []
     if new_problem_objects:
@@ -2774,21 +2808,21 @@ def compare_periods(params: dict[str, list[str]]) -> dict:
                     "budget": row.get("budget", ""),
                     "sources": row.get("sources", ""),
                     "risk": {"base": 0, "target": 0, "delta": 0},
-                    "metrics": {metric: {"base": 0.0, "target": 0.0, "delta": 0.0, "delta_percent": None} for metric in metrics},
+                    "metrics": {metric: {"base": MONEY_ZERO, "target": MONEY_ZERO, "delta": MONEY_ZERO, "delta_percent": None} for metric in metrics},
                 },
             )
             if row.get("sources"):
                 item["sources"] = row["sources"]
             item["risk"][label] = int(row.get("risk_score") or 0)
             for metric in metrics:
-                item["metrics"][metric][label] = row.get(metric, 0.0)
+                item["metrics"][metric][label] = parse_money(row.get(metric))
     rows = []
     for item in by_key.values():
-        total_delta = 0.0
+        total_delta = MONEY_ZERO
         for metric in metrics:
             values = item["metrics"][metric]
             values["delta"] = values["target"] - values["base"]
-            values["delta_percent"] = (values["delta"] / values["base"] * 100.0) if values["base"] else None
+            values["delta_percent"] = float(values["delta"] / values["base"] * Decimal("100.0")) if values["base"] else None
             total_delta += abs(values["delta"])
         item["risk"]["delta"] = item["risk"]["target"] - item["risk"]["base"]
         item["total_delta"] = total_delta
@@ -2963,7 +2997,7 @@ class Handler(SimpleHTTPRequestHandler):
         self.write_json({"error": "not_found"}, status=404)
 
     def write_json(self, payload: object, status: int = 200) -> None:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        body = json.dumps(json_safe(payload), ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
