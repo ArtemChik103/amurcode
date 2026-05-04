@@ -1,0 +1,23 @@
+"""Compatibility exports for constants kept in analytics.api."""
+
+from .api import (
+    ASSISTANT_ACTION_FIELDS,
+    ASSISTANT_FOLLOWUP_ACTION_FIELDS,
+    ASSISTANT_FOLLOWUP_FIELDS,
+    ASSISTANT_INTENTS,
+    ASSISTANT_OPEN_VIEWS,
+    ASSISTANT_POST_FILTERS,
+    CAPITAL_KVR,
+    DATA_DIR,
+    DATA_RUNTIME_DIR,
+    METRICS,
+    METRIC_KEYS,
+    MONTHS,
+    QUICK_ACTIONS,
+    RAG_DIR,
+    REVIEWS_PATH,
+    ROOT,
+    SNAPSHOT_RE,
+    STATIC_DIR,
+    TEMPLATES,
+)
