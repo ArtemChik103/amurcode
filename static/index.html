@@ -440,7 +440,7 @@
                 <h4>{{ group.label }} · {{ group.rows.length }}</h4>
                 <div v-for="row in group.rows.slice(0, 20)" :key="group.reason + row.rowKey" class="problem-item">
                   <strong>{{ row.object_name || row.object_code }}</strong>
-                  <span><span class="risk-text" :class="row.riskClass">{{ row.riskLabel }} · {{ row.riskScore }}</span> · {{ formatMoney(row.plan) }} план · {{ formatMoney(row.cash) }} касса</span>
+                  <span><span class="risk-text" :class="row.riskClass">{{ row.riskLabel }} · {{ row.riskScore }}</span> · <span class="pill muted">{{ row.review?.label || 'Новый' }}</span> · {{ formatMoney(row.plan) }} план · {{ formatMoney(row.cash) }} касса</span>
                   <button type="button" class="ghost compact-button" @click="openObject(row)">Открыть</button>
                 </div>
               </section>
@@ -587,6 +587,27 @@
             <span>Документы {{ formatMoney(objectCard.pipeline?.documents) }}</span>
             <span>Оплачено {{ formatMoney(objectCard.pipeline?.paid) }}</span>
             <span>Касса {{ formatMoney(objectCard.pipeline?.cash) }}</span>
+          </div>
+          <div class="dialog-section review-form">
+            <h4>Проверка</h4>
+            <label>
+              <span>Статус</span>
+              <select v-model="reviewDraft.status">
+                <option value="new">Новый</option>
+                <option value="in_progress">В работе</option>
+                <option value="checked">Проверен</option>
+                <option value="not_issue">Не проблема</option>
+              </select>
+            </label>
+            <label>
+              <span>Ответственный</span>
+              <input v-model.trim="reviewDraft.assignee" type="text" maxlength="120" />
+            </label>
+            <label>
+              <span>Комментарий</span>
+              <textarea v-model.trim="reviewDraft.comment" maxlength="1000"></textarea>
+            </label>
+            <button type="button" class="ghost" :disabled="loading.review" @click="saveReview">{{ loading.review ? 'Сохранение...' : 'Сохранить' }}</button>
           </div>
           <div class="dialog-section">
             <h4>Документы</h4>

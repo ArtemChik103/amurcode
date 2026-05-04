@@ -25,6 +25,8 @@ from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "case"
+DATA_RUNTIME_DIR = ROOT / "data"
+REVIEWS_PATH = DATA_RUNTIME_DIR / "reviews.json"
 STATIC_DIR = ROOT / "static"
 RAG_DIR = ROOT / "docs" / "rag"
 QUALITY_ISSUES: list[dict] = []
@@ -162,6 +164,7 @@ ASSISTANT_POST_FILTERS = {
     "no_cash",
     "low_cash",
     "data_gap",
+    "unreviewed",
 }
 ASSISTANT_OPEN_VIEWS = {"overview", "objects", "problems", "records", "changes"}
 ASSISTANT_ACTION_FIELDS = {
@@ -227,6 +230,83 @@ def add_quality_issue(
             "value": "" if value is None else str(value),
         }
     )
+
+
+REVIEW_STATUSES = {
+    "new": "Новый",
+    "in_progress": "В работе",
+    "checked": "Проверен",
+    "not_issue": "Не проблема",
+}
+
+
+def load_reviews() -> dict:
+    if not REVIEWS_PATH.exists():
+        return {}
+    try:
+        payload = json.loads(REVIEWS_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        add_quality_issue(
+            relative_source(REVIEWS_PATH),
+            "",
+            "warn",
+            "reviews_parse_failed",
+            "Не удалось прочитать локальные статусы проверки.",
+        )
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def save_reviews(payload: dict) -> None:
+    REVIEWS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = REVIEWS_PATH.with_name(f"{REVIEWS_PATH.name}.tmp")
+    temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_path.replace(REVIEWS_PATH)
+
+
+def default_review() -> dict:
+    return {
+        "status": "new",
+        "label": REVIEW_STATUSES["new"],
+        "assignee": "",
+        "comment": "",
+        "updated_at": "",
+        "updated_by": "",
+    }
+
+
+def review_for_object(object_key: str) -> dict:
+    saved = load_reviews().get(object_key, {})
+    review = default_review()
+    if isinstance(saved, dict):
+        review.update({key: value for key, value in saved.items() if key in review or key in {"updated_by"}})
+    if review.get("status") not in REVIEW_STATUSES:
+        review["status"] = "new"
+    review["label"] = REVIEW_STATUSES[review["status"]]
+    return review
+
+
+def update_review(object_key: str, payload: dict) -> dict:
+    if not object_key:
+        return {"error": "object_key_required"}
+    status = str(payload.get("status") or "new").strip()
+    if status not in REVIEW_STATUSES:
+        return {"error": "invalid_status"}
+    reviews = load_reviews()
+    review = {
+        "status": status,
+        "assignee": str(payload.get("assignee") or "")[:120],
+        "comment": str(payload.get("comment") or "")[:1000],
+        "updated_at": datetime.now().replace(microsecond=0).isoformat(),
+        "updated_by": "local",
+    }
+    reviews[object_key] = review
+    save_reviews(reviews)
+    return review_for_object(object_key)
+
+
+def reviews_payload() -> dict:
+    return {key: review_for_object(key) for key in load_reviews()}
 
 
 def parse_amount(value: object, source_file: str = "", source_row: int | str = "", field: str = "") -> float:
@@ -1096,6 +1176,7 @@ def top_risk_payload(row: dict) -> dict:
         "risk_score": int(row.get("risk_score") or breakdown["score"]),
         "risk_label": row.get("risk_label") or breakdown["label"],
         "risk_breakdown": breakdown,
+        "review": row.get("review") or review_for_object(row.get("object_key", "")),
         "plan": float(pipeline.get("plan") or 0),
         "cash": float(pipeline.get("cash") or 0),
         "documents": float(pipeline.get("documents") or 0),
@@ -1117,6 +1198,7 @@ def next_actions_payload(mode: str, has_top_risk: bool = False, has_problems: bo
     if has_problems:
         actions.extend(
             [
+                {"label": "Показать непроверенные", "action": {"post_filter": "unreviewed"}},
                 {"label": "Показать без кассы", "action": {"post_filter": "no_cash"}},
                 {"label": "Показать без оплат", "action": {"post_filter": "no_payments"}},
                 {"label": "Показать без документов", "action": {"post_filter": "no_documents"}},
@@ -1208,6 +1290,7 @@ def aggregate(records: list[dict], metrics: list[str] | None = None) -> dict:
         row["risk_level"] = row["risk_breakdown"]["level"]
         row["risk_label"] = row["risk_breakdown"]["label"]
         row["risk_explanation"] = risk_explanation(row)
+        row["review"] = review_for_object(row["object_key"])
         row["total"] = sum(row[metric] for metric in metric_keys)
         rows.append(row)
     rows.sort(key=lambda item: item["total"], reverse=True)
@@ -1231,13 +1314,15 @@ def apply_aggregate_post_filter(result: dict, post_filter: str, metrics: list[st
     """Фильтрует уже агрегированные объекты по проблемам исполнения."""
     aliases = {"execution_problems": "execution_problems"}
     selected = aliases.get(post_filter, post_filter)
-    valid = {"no_documents", "no_payments", "no_cash", "low_cash", "low_execution", "data_gap", "execution_problems"}
+    valid = {"no_documents", "no_payments", "no_cash", "low_cash", "low_execution", "data_gap", "execution_problems", "unreviewed"}
     if selected not in valid:
         return result
     rows = []
     for row in result.get("rows", []):
         reasons = row.get("problem_reasons") or problem_reasons(row)
-        if selected == "execution_problems" and reasons:
+        if selected == "unreviewed" and (row.get("review") or {}).get("status") in {"new", "in_progress"}:
+            rows.append(row)
+        elif selected == "execution_problems" and reasons:
             rows.append(row)
         elif selected == "low_execution":
             plan = float(row.get("limit") or 0) + float(row.get("obligation") or 0)
@@ -1998,6 +2083,7 @@ def object_detail(params: dict[str, list[str]]) -> dict:
         "risk_label": row.get("risk_label", risk_label("low")),
         "risk_breakdown": row.get("risk_breakdown") or risk_breakdown(row),
         "risk_explanation": row.get("risk_explanation", []),
+        "review": row.get("review") or review_for_object(object_key),
         "diagnosis": object_diagnosis(row),
         "pipeline": row.get("pipeline", {}),
         "sources": [source.strip() for source in str(row.get("sources", "")).split(",") if source.strip()],
@@ -2078,10 +2164,11 @@ def export_excel(params: dict[str, list[str]]) -> tuple[bytes, str]:
         ws.append(list(item))
 
     objects_ws = wb.create_sheet("Объекты")
-    objects_ws.append(["Объект", "Код", "Бюджет", "План", "Документы", "Оплачено", "Касса", "Статус", "Риск", "Балл риска", "Причины риска", "Факторы риска", "Источники"])
+    objects_ws.append(["Объект", "Код", "Бюджет", "План", "Документы", "Оплачено", "Касса", "Статус", "Риск", "Балл риска", "Причины риска", "Факторы риска", "Статус проверки", "Ответственный", "Комментарий", "Источники"])
     for row in rows:
         pipeline = row.get("pipeline") or row_pipeline(row)
         factors = (row.get("risk_breakdown") or risk_breakdown(row)).get("factors") or []
+        review = row.get("review") or default_review()
         objects_ws.append([
             row.get("object_name", ""),
             row.get("object_code", ""),
@@ -2095,11 +2182,14 @@ def export_excel(params: dict[str, list[str]]) -> tuple[bytes, str]:
             row.get("risk_score", 0),
             ", ".join(row.get("risk_explanation") or []),
             ", ".join(f"{item.get('label', '')} +{item.get('points', 0)}" for item in factors),
+            review.get("label", ""),
+            review.get("assignee", ""),
+            review.get("comment", ""),
             row.get("sources", ""),
         ])
 
     problems_ws = wb.create_sheet("Проблемы")
-    problems_ws.append(["Причина", "Причина текстом", "Риск", "Балл риска", "Объект", "Код", "План", "Документы", "Оплачено", "Касса", "Источники"])
+    problems_ws.append(["Причина", "Причина текстом", "Риск", "Балл риска", "Объект", "Код", "План", "Документы", "Оплачено", "Касса", "Статус проверки", "Ответственный", "Комментарий", "Источники"])
     reason_labels = {
         "no_documents": "Есть план, но документы не найдены",
         "no_payments": "Есть документы, но оплат не найдено",
@@ -2114,6 +2204,7 @@ def export_excel(params: dict[str, list[str]]) -> tuple[bytes, str]:
     )
     for row in problem_rows:
         pipeline = row.get("pipeline") or row_pipeline(row)
+        review = row.get("review") or default_review()
         for reason in row.get("problem_reasons") or []:
             problems_ws.append([
                 reason,
@@ -2126,6 +2217,9 @@ def export_excel(params: dict[str, list[str]]) -> tuple[bytes, str]:
                 pipeline.get("documents", 0),
                 pipeline.get("paid", 0),
                 pipeline.get("cash", 0),
+                review.get("label", ""),
+                review.get("assignee", ""),
+                review.get("comment", ""),
                 row.get("sources", ""),
             ])
 
@@ -2380,8 +2474,13 @@ def export_pdf(params: dict[str, list[str]]) -> tuple[bytes, str]:
     def risk_factor_text(item: dict) -> str:
         factors = ((item.get("risk_breakdown") or {}).get("factors") or [])[:3]
         if factors:
-            return ", ".join(str(factor.get("label") or "") for factor in factors if factor.get("label"))
-        return ", ".join(item.get("reasons") or [])[:160]
+            text = ", ".join(str(factor.get("label") or "") for factor in factors if factor.get("label"))
+        else:
+            text = ", ".join(item.get("reasons") or [])[:160]
+        review = item.get("review") or {}
+        if review.get("label"):
+            text = f"{text}; проверка: {review['label']}" if text else f"Проверка: {review['label']}"
+        return text
 
     def table(data: list[list[object]], widths: list[float] | None = None, risk_column: int | None = None) -> Table:
         converted = [[p(cell, "PdfHeaderCell" if row_index == 0 else "PdfCell") for cell in row] for row_index, row in enumerate(data)]
@@ -2567,6 +2666,7 @@ def compare_object_summary(row: dict, risk_value: int | None = None, base_row: d
         "risk_score": score,
         "risk_label": risk_label(risk_level(score)),
         "risk_breakdown": breakdown,
+        "review": row.get("review") or review_for_object(row.get("object_key", "")),
         "plan": float(pipeline.get("plan") or 0),
         "cash": float(pipeline.get("cash") or 0),
         "documents": float(pipeline.get("documents") or 0),
@@ -2692,6 +2792,7 @@ def compare_periods(params: dict[str, list[str]]) -> dict:
             total_delta += abs(values["delta"])
         item["risk"]["delta"] = item["risk"]["target"] - item["risk"]["base"]
         item["total_delta"] = total_delta
+        item["review"] = review_for_object(item["object_key"])
         rows.append(item)
     rows.sort(key=lambda item: item["total_delta"], reverse=True)
     return {
@@ -2745,6 +2846,16 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/control":
             self.write_json(control_summary(parse_qs(parsed.query)))
+            return
+        if parsed.path == "/api/reviews":
+            self.write_json(reviews_payload())
+            return
+        if parsed.path == "/api/review":
+            object_key = parse_qs(parsed.query).get("object_key", [""])[0].strip()
+            if not object_key:
+                self.write_json({"error": "object_key_required"}, status=400)
+                return
+            self.write_json(review_for_object(object_key))
             return
         if parsed.path == "/api/object":
             payload = object_detail(parse_qs(parsed.query))
@@ -2815,6 +2926,17 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/review":
+            try:
+                length = int(self.headers.get("Content-Length", "0") or "0")
+                payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+                object_key = str(payload.get("object_key") or "").strip()
+                result = update_review(object_key, payload)
+                status = 400 if result.get("error") else 200
+                self.write_json(result, status=status)
+            except json.JSONDecodeError:
+                self.write_json({"error": "invalid_json"}, status=400)
+            return
         if parsed.path == "/api/assistant":
             try:
                 length = int(self.headers.get("Content-Length", "0") or "0")

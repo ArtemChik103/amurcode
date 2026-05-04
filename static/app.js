@@ -148,6 +148,7 @@ createApp({
         object: false,
         explain: false,
         control: false,
+        review: false,
       },
 
       error: "",
@@ -161,6 +162,7 @@ createApp({
       suppressAutoLoad: false,
       expandedPipelines: {},
       objectCard: null,
+      reviewDraft: { status: "new", assignee: "", comment: "" },
       objectRowsOpen: false,
       problemRiskFilter: "all",
       riskHelpOpen: false,
@@ -237,6 +239,7 @@ createApp({
           riskLabel: row.risk_label || this.riskLabel(row.risk_level),
           riskScore: Number(row.risk_score || 0),
           riskClass: this.riskClass(row.risk_level),
+          review: row.review || { status: "new", label: "Новый", assignee: "", comment: "" },
         };
       });
     },
@@ -814,7 +817,7 @@ createApp({
       if (action.open === "top_risk" && this.topRisks[0]) {
         return this.openObject(this.topRisks[0]);
       }
-      if (action.open === "control") {
+        if (action.open === "control") {
         if (this.mode === "slice") {
           this.setView("overview");
         }
@@ -1197,11 +1200,46 @@ createApp({
         params.set("object_key", row.object_key);
         if (row.budget) params.set("budget", row.budget);
         this.objectCard = await fetchJson(`/api/object?${params.toString()}`);
+        this.reviewDraft = {
+          status: this.objectCard.review?.status || "new",
+          assignee: this.objectCard.review?.assignee || "",
+          comment: this.objectCard.review?.comment || "",
+        };
       } catch (error) {
         console.error(error);
         this.error = "Не удалось открыть карточку объекта.";
       } finally {
         this.loading.object = false;
+      }
+    },
+
+    async saveReview() {
+      if (!this.objectCard?.object_key) return;
+      this.loading.review = true;
+      this.error = "";
+      try {
+        const review = await fetchJson("/api/review", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            object_key: this.objectCard.object_key,
+            status: this.reviewDraft.status,
+            assignee: this.reviewDraft.assignee,
+            comment: this.reviewDraft.comment,
+          }),
+        });
+        this.objectCard = { ...this.objectCard, review };
+        this.query.rows = (this.query.rows || []).map((row) => (
+          row.object_key === this.objectCard.object_key ? { ...row, review } : row
+        ));
+        this.compare.rows = (this.compare.rows || []).map((row) => (
+          row.object_key === this.objectCard.object_key ? { ...row, review } : row
+        ));
+      } catch (error) {
+        console.error(error);
+        this.error = "Не удалось сохранить статус проверки.";
+      } finally {
+        this.loading.review = false;
       }
     },
 

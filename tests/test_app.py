@@ -305,6 +305,44 @@ class DataLoadTests(unittest.TestCase):
         self.assertEqual(detail["risk_breakdown"]["score"], detail["risk_score"])
         self.assertTrue(detail["risk_breakdown"]["factors"])
 
+    def test_object_detail_includes_review(self):
+        original_path = app.REVIEWS_PATH
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app.REVIEWS_PATH = Path(temp_dir) / "reviews.json"
+            try:
+                query = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"]})
+                key = query["rows"][0]["object_key"]
+                detail = app.object_detail({"date": ["2026-04-01"], "template": ["skk"], "object_key": [key]})
+                self.assertEqual(detail["review"]["status"], "new")
+                self.assertEqual(detail["review"]["label"], "Новый")
+            finally:
+                app.REVIEWS_PATH = original_path
+
+    def test_unreviewed_post_filter(self):
+        original_path = app.REVIEWS_PATH
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app.REVIEWS_PATH = Path(temp_dir) / "reviews.json"
+            try:
+                query = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"], "post_filter": ["execution_problems"]})
+                key = query["rows"][0]["object_key"]
+                app.update_review(key, {"status": "checked"})
+                filtered = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"], "post_filter": ["unreviewed"]})
+                self.assertNotIn(key, {row["object_key"] for row in filtered["rows"]})
+                self.assertTrue(all(row["review"]["status"] in {"new", "in_progress"} for row in filtered["rows"]))
+            finally:
+                app.REVIEWS_PATH = original_path
+
+    def test_old_scenarios_work_without_reviews_file(self):
+        original_path = app.REVIEWS_PATH
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app.REVIEWS_PATH = Path(temp_dir) / "missing" / "reviews.json"
+            try:
+                result = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"]})
+                self.assertTrue(result["rows"])
+                self.assertEqual(result["rows"][0]["review"]["status"], "new")
+            finally:
+                app.REVIEWS_PATH = original_path
+
     def test_object_detail_includes_diagnosis(self):
         query = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"], "post_filter": ["execution_problems"]})
         key = query["rows"][0]["object_key"]
@@ -519,6 +557,42 @@ class HttpTests(unittest.TestCase):
         self.assertIn("issues", payload)
         self.assertIn("by_name", payload["object_linkage"])
 
+    def test_review_post_persists_status(self):
+        original_path = app.REVIEWS_PATH
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app.REVIEWS_PATH = Path(temp_dir) / "reviews.json"
+            try:
+                object_key = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"]})["rows"][0]["object_key"]
+                status, content_type, body = self.request(
+                    "/api/review",
+                    method="POST",
+                    payload={"object_key": object_key, "status": "in_progress", "assignee": "Анна", "comment": "Проверить платежи"},
+                )
+                self.assertEqual(status, 200)
+                self.assertIn("application/json", content_type)
+                payload = json.loads(body.decode("utf-8"))
+                self.assertEqual(payload["status"], "in_progress")
+                self.assertEqual(payload["label"], "В работе")
+                self.assertTrue(app.REVIEWS_PATH.exists())
+                self.assertEqual(app.review_for_object(object_key)["assignee"], "Анна")
+            finally:
+                app.REVIEWS_PATH = original_path
+
+    def test_review_invalid_status_returns_400(self):
+        original_path = app.REVIEWS_PATH
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app.REVIEWS_PATH = Path(temp_dir) / "reviews.json"
+            try:
+                status, _, body = self.request(
+                    "/api/review",
+                    method="POST",
+                    payload={"object_key": "x", "status": "bad"},
+                )
+                self.assertEqual(status, 400)
+                self.assertEqual(json.loads(body.decode("utf-8"))["error"], "invalid_status")
+            finally:
+                app.REVIEWS_PATH = original_path
+
     def test_object_and_excel_export_endpoints(self):
         query = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"]})
         object_key = query["rows"][0]["object_key"]
@@ -567,6 +641,9 @@ class HttpTests(unittest.TestCase):
         workbook = load_workbook(BytesIO(content), read_only=True)
         object_headers = [cell for cell in next(workbook["Объекты"].iter_rows(values_only=True))]
         self.assertIn("Факторы риска", object_headers)
+        self.assertIn("Статус проверки", object_headers)
+        self.assertIn("Ответственный", object_headers)
+        self.assertIn("Комментарий", object_headers)
         method_rows = list(workbook["Методика"].iter_rows(values_only=True))
         method_text = "\n".join(" ".join(str(cell or "") for cell in row) for row in method_rows)
         self.assertIn(app.RISK_MODEL_VERSION, method_text)
@@ -662,6 +739,7 @@ class StaticFilesTests(unittest.TestCase):
         self.assertIn("/api/trace", script)
         self.assertIn("/api/readiness", script)
         self.assertIn("/api/object", script)
+        self.assertIn("/api/review", script)
         self.assertIn("/api/export.xlsx", script)
         self.assertIn("/api/catalog/quick-actions", script)
         self.assertIn("/api/assistant", script)
@@ -685,6 +763,7 @@ class StaticFilesTests(unittest.TestCase):
             "exportCsv",
             "exportExcel",
             "openObject",
+            "saveReview",
             "quickActions",
             "command",
             "applyQuickAction",

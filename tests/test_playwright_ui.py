@@ -20,6 +20,9 @@ class PlaywrightUiTests(unittest.TestCase):
     def setUpClass(cls):
         if sync_playwright is None:
             raise unittest.SkipTest("playwright is not installed")
+        cls.old_reviews_path = app.REVIEWS_PATH
+        cls.reviews_temp = tempfile.TemporaryDirectory()
+        app.REVIEWS_PATH = Path(cls.reviews_temp.name) / "reviews.json"
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
         cls.port = cls.server.server_address[1]
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
@@ -36,6 +39,8 @@ class PlaywrightUiTests(unittest.TestCase):
         cls.server.shutdown()
         cls.server.server_close()
         cls.thread.join(timeout=5)
+        app.REVIEWS_PATH = cls.old_reviews_path
+        cls.reviews_temp.cleanup()
 
     def setUp(self):
         self.context = self.browser.new_context(accept_downloads=True, locale="ru-RU")
@@ -258,9 +263,29 @@ class PlaywrightUiTests(unittest.TestCase):
         self.click_button("Проблемные СКК")
         self.click_button("Проблемы")
         self.page.get_by_text(re.compile("Критичный|Высокий|Средний")).first.wait_for(timeout=10000)
+        self.page.get_by_text("Новый").first.wait_for(timeout=10000)
+
+    def test_review_status_persists_in_object_card(self):
+        with self.page.expect_response(lambda response: "/api/query?" in response.url and "post_filter=execution_problems" in response.url):
+            self.click_button("Проблемные СКК")
+        self.page.get_by_role("heading", name="Проблемы").wait_for(timeout=10000)
+        self.page.locator(".top-risk-item").first.click()
+        self.page.get_by_text("Проверка").wait_for(timeout=10000)
+        self.page.get_by_label("Статус").select_option("in_progress")
+        self.page.get_by_label("Ответственный").fill("Мария")
+        self.page.get_by_label("Комментарий").fill("Взято в ручную проверку")
+        self.click_button("Сохранить")
+        self.page.get_by_role("button", name="Сохранить").wait_for(state="visible", timeout=10000)
+        self.page.locator(".object-dialog").get_by_title("Закрыть").click()
+        self.page.locator(".top-risk-item").first.click()
+        self.page.get_by_label("Статус").wait_for(timeout=10000)
+        self.assertEqual(self.page.get_by_label("Статус").input_value(), "in_progress")
+        self.assertEqual(self.page.get_by_label("Ответственный").input_value(), "Мария")
 
     def test_top_risk_opens_object_card(self):
-        self.click_button("Проблемные СКК")
+        with self.page.expect_response(lambda response: "/api/query?" in response.url and "post_filter=execution_problems" in response.url):
+            self.click_button("Проблемные СКК")
+        self.page.get_by_role("heading", name="Проблемы").wait_for(timeout=10000)
         self.page.locator(".top-risk-item").first.click()
         self.page.get_by_role("heading", name="Документы").wait_for(timeout=10000)
         self.page.get_by_text("Почему такой риск").wait_for(timeout=10000)

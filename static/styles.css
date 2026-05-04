@@ -1272,6 +1272,21 @@ dialog::backdrop {
   color: var(--heading);
 }
 
+.review-form {
+  display: grid;
+  gap: 10px;
+}
+
+.review-form label {
+  display: grid;
+  gap: 5px;
+}
+
+.review-form label span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .object-documents {
   display: grid;
   gap: 8px;
