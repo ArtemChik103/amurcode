@@ -282,6 +282,7 @@
               <div class="risk-help-grid">
                 <span v-for="reason in riskHelpSummary.reasons" :key="reason" class="risk-help-chip">{{ reason }}</span>
               </div>
+              <p>Версия методики: 2026-05-05</p>
               <p>Риск помогает выбрать, что проверить первым. Это не юридический вывод.</p>
             </div>
           </article>
@@ -569,6 +570,16 @@
             <h4>{{ objectCard.diagnosis.title }}</h4>
             <ul>
               <li v-for="item in objectCard.diagnosis.bullets" :key="item">{{ item }}</li>
+            </ul>
+          </div>
+          <div v-if="objectCard?.risk_breakdown" class="dialog-section risk-breakdown">
+            <h4>Почему такой риск</h4>
+            <p>Балл: {{ objectCard.risk_breakdown.score }}</p>
+            <p>Методика: {{ objectCard.risk_breakdown.version }}</p>
+            <ul>
+              <li v-for="factor in objectCard.risk_breakdown.factors" :key="factor.label + factor.points">
+                {{ factor.label }} · +{{ factor.points }}
+              </li>
             </ul>
           </div>
           <div class="pipeline-line">

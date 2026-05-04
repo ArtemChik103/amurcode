@@ -259,8 +259,12 @@ class PlaywrightUiTests(unittest.TestCase):
         self.click_button("Проблемные СКК")
         self.page.locator(".top-risk-item").first.click()
         self.page.get_by_role("heading", name="Документы").wait_for(timeout=10000)
+        self.page.get_by_text("Почему такой риск").wait_for(timeout=10000)
         self.page.get_by_text(re.compile("Критичный|Высокий|Средний|Низкий")).first.wait_for(timeout=10000)
         self.page.get_by_text("План", exact=False).first.wait_for(timeout=10000)
+        body = self.page.locator("body").inner_text()
+        self.assertNotIn("no_cash", body)
+        self.assertNotIn("data_gap", body)
 
     def test_compare_insights_visible(self):
         self.click_button("Сравнить две даты")

@@ -264,6 +264,15 @@ class DataLoadTests(unittest.TestCase):
         scores = [row["risk_score"] for row in result["rows"]]
         self.assertEqual(scores, sorted(scores, reverse=True))
 
+    def test_risk_breakdown_matches_score(self):
+        result = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"]})
+        row = result["rows"][0]
+        breakdown = app.risk_breakdown(row)
+        self.assertEqual(breakdown["version"], app.RISK_MODEL_VERSION)
+        self.assertEqual(breakdown["score"], app.risk_score(row))
+        self.assertEqual(row["risk_breakdown"]["score"], row["risk_score"])
+        self.assertEqual(row["risk_breakdown"]["label"], row["risk_label"])
+
     def test_compare_insights_are_returned(self):
         result = app.compare_periods({
             "base": ["2025-02-01"],
@@ -287,6 +296,14 @@ class DataLoadTests(unittest.TestCase):
         detail = app.object_detail({"date": ["2026-04-01"], "template": ["skk"], "object_key": [key]})
         self.assertIn("risk_score", detail)
         self.assertIn("risk_label", detail)
+
+    def test_object_detail_includes_risk_breakdown(self):
+        query = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"]})
+        key = query["rows"][0]["object_key"]
+        detail = app.object_detail({"date": ["2026-04-01"], "template": ["skk"], "object_key": [key]})
+        self.assertEqual(detail["risk_breakdown"]["version"], app.RISK_MODEL_VERSION)
+        self.assertEqual(detail["risk_breakdown"]["score"], detail["risk_score"])
+        self.assertTrue(detail["risk_breakdown"]["factors"])
 
     def test_object_detail_includes_diagnosis(self):
         query = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"], "post_filter": ["execution_problems"]})
@@ -543,6 +560,17 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(workbook["Итоги"]["A1"].font.color.rgb, "00FFFFFF")
         выводы = "\n".join(str(row[0] or "") for row in workbook["Выводы"].iter_rows(values_only=True))
         self.assertIn("Следующие действия", выводы)
+
+    def test_excel_methodology_includes_risk_rules(self):
+        content, _ = app.export_excel({"date": ["2026-04-01"], "template": ["skk"]})
+        workbook = load_workbook(BytesIO(content), read_only=True)
+        object_headers = [cell for cell in next(workbook["Объекты"].iter_rows(values_only=True))]
+        self.assertIn("Факторы риска", object_headers)
+        method_rows = list(workbook["Методика"].iter_rows(values_only=True))
+        method_text = "\n".join(" ".join(str(cell or "") for cell in row) for row in method_rows)
+        self.assertIn(app.RISK_MODEL_VERSION, method_text)
+        self.assertIn("Код Фактор Баллы", method_text)
+        self.assertIn("no_cash", method_text)
 
     def test_pdf_export_endpoint_or_function_returns_pdf(self):
         try:

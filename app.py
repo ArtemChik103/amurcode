@@ -973,8 +973,22 @@ def problem_reasons(row: dict) -> list[str]:
     return reasons
 
 
-def risk_score(row: dict) -> int:
-    """Считает приоритет ручной проверки, а не юридическую оценку нарушения."""
+RISK_MODEL_VERSION = "2026-05-05"
+RISK_RULES = [
+    {"code": "no_cash", "label": "Нет кассового исполнения", "points": 30},
+    {"code": "no_payments", "label": "Есть документы, но нет оплат", "points": 25},
+    {"code": "no_documents", "label": "Есть план, но нет документов", "points": 20},
+    {"code": "low_cash", "label": "Касса ниже 25% от плана", "points": 15},
+    {"code": "data_gap", "label": "Данные есть не во всех источниках", "points": 15},
+    {"code": "large_plan_1b", "label": "План от 1 млрд", "points": 10},
+    {"code": "large_plan_100m", "label": "План от 100 млн", "points": 7},
+    {"code": "documents_without_paid", "label": "Документы есть, оплат нет", "points": 5},
+    {"code": "plan_without_cash", "label": "План есть, кассы нет", "points": 5},
+]
+
+
+def risk_breakdown(row: dict) -> dict:
+    """Объясняет приоритет ручной проверки теми же правилами, что и численный риск."""
     pipeline = row.get("pipeline") or row_pipeline(row)
     reasons = row.get("problem_reasons") or problem_reasons(row)
     plan = float(pipeline.get("plan") or 0)
@@ -982,25 +996,49 @@ def risk_score(row: dict) -> int:
     paid = float(pipeline.get("paid") or 0)
     cash = float(pipeline.get("cash") or 0)
     score = 0
+    factors = []
+
+    def add_factor(code: str) -> None:
+        nonlocal score
+        rule = next((item for item in RISK_RULES if item["code"] == code), None)
+        if not rule:
+            return
+        points = int(rule["points"])
+        score += points
+        factors.append({"code": code, "label": rule["label"], "points": points})
+
     if "no_cash" in reasons:
-        score += 30
+        add_factor("no_cash")
     if "no_payments" in reasons:
-        score += 25
+        add_factor("no_payments")
     if "no_documents" in reasons:
-        score += 20
+        add_factor("no_documents")
     if "low_cash" in reasons:
-        score += 15
+        add_factor("low_cash")
     if "data_gap" in reasons:
-        score += 15
+        add_factor("data_gap")
     if plan >= 1_000_000_000:
-        score += 10
+        add_factor("large_plan_1b")
     elif plan >= 100_000_000:
-        score += 7
+        add_factor("large_plan_100m")
     if documents > 0 and paid == 0:
-        score += 5
+        add_factor("documents_without_paid")
     if cash == 0 and plan > 0:
-        score += 5
-    return min(score, 100)
+        add_factor("plan_without_cash")
+    score = min(score, 100)
+    level = risk_level(score)
+    return {
+        "version": RISK_MODEL_VERSION,
+        "score": score,
+        "level": level,
+        "label": risk_label(level),
+        "factors": factors,
+    }
+
+
+def risk_score(row: dict) -> int:
+    """Считает приоритет ручной проверки, а не юридическую оценку нарушения."""
+    return risk_breakdown(row)["score"]
 
 
 def risk_level(score: int) -> str:
@@ -1048,14 +1086,16 @@ def short_object_name(row: dict) -> str:
 
 def top_risk_payload(row: dict) -> dict:
     pipeline = row.get("pipeline") or row_pipeline(row)
+    breakdown = row.get("risk_breakdown") or risk_breakdown(row)
     return {
         "object_key": row.get("object_key", ""),
         "object_code": row.get("object_code", ""),
         "object_name": row.get("object_name") or row.get("object_code") or "Объект без названия",
         "short_name": short_object_name(row),
         "budget": row.get("budget", ""),
-        "risk_score": int(row.get("risk_score") or 0),
-        "risk_label": row.get("risk_label") or risk_label(risk_level(int(row.get("risk_score") or 0))),
+        "risk_score": int(row.get("risk_score") or breakdown["score"]),
+        "risk_label": row.get("risk_label") or breakdown["label"],
+        "risk_breakdown": breakdown,
         "plan": float(pipeline.get("plan") or 0),
         "cash": float(pipeline.get("cash") or 0),
         "documents": float(pipeline.get("documents") or 0),
@@ -1163,9 +1203,10 @@ def aggregate(records: list[dict], metrics: list[str] | None = None) -> dict:
         row["pipeline"] = row_pipeline(row)
         row["problem_reasons"] = problem_reasons(row)
         row["status"] = row_status_from_reasons(row["problem_reasons"])
-        row["risk_score"] = risk_score(row)
-        row["risk_level"] = risk_level(row["risk_score"])
-        row["risk_label"] = risk_label(row["risk_level"])
+        row["risk_breakdown"] = risk_breakdown(row)
+        row["risk_score"] = row["risk_breakdown"]["score"]
+        row["risk_level"] = row["risk_breakdown"]["level"]
+        row["risk_label"] = row["risk_breakdown"]["label"]
         row["risk_explanation"] = risk_explanation(row)
         row["total"] = sum(row[metric] for metric in metric_keys)
         rows.append(row)
@@ -1955,6 +1996,7 @@ def object_detail(params: dict[str, list[str]]) -> dict:
         "risk_score": row.get("risk_score", 0),
         "risk_level": row.get("risk_level", "low"),
         "risk_label": row.get("risk_label", risk_label("low")),
+        "risk_breakdown": row.get("risk_breakdown") or risk_breakdown(row),
         "risk_explanation": row.get("risk_explanation", []),
         "diagnosis": object_diagnosis(row),
         "pipeline": row.get("pipeline", {}),
@@ -2036,9 +2078,10 @@ def export_excel(params: dict[str, list[str]]) -> tuple[bytes, str]:
         ws.append(list(item))
 
     objects_ws = wb.create_sheet("Объекты")
-    objects_ws.append(["Объект", "Код", "Бюджет", "План", "Документы", "Оплачено", "Касса", "Статус", "Риск", "Балл риска", "Причины риска", "Источники"])
+    objects_ws.append(["Объект", "Код", "Бюджет", "План", "Документы", "Оплачено", "Касса", "Статус", "Риск", "Балл риска", "Причины риска", "Факторы риска", "Источники"])
     for row in rows:
         pipeline = row.get("pipeline") or row_pipeline(row)
+        factors = (row.get("risk_breakdown") or risk_breakdown(row)).get("factors") or []
         objects_ws.append([
             row.get("object_name", ""),
             row.get("object_code", ""),
@@ -2051,6 +2094,7 @@ def export_excel(params: dict[str, list[str]]) -> tuple[bytes, str]:
             row.get("risk_label", ""),
             row.get("risk_score", 0),
             ", ".join(row.get("risk_explanation") or []),
+            ", ".join(f"{item.get('label', '')} +{item.get('points', 0)}" for item in factors),
             row.get("sources", ""),
         ])
 
@@ -2161,6 +2205,8 @@ def export_excel(params: dict[str, list[str]]) -> tuple[bytes, str]:
         ])
 
     method_ws = wb.create_sheet("Методика")
+    method_ws.append(["Версия методики риска", RISK_MODEL_VERSION])
+    method_ws.append([])
     for line in (
         "РЧБ и соглашения берутся как последний месячный срез не позже выбранной даты.",
         "Контракты, платежи и БУАУ учитываются накопительно до выбранной даты.",
@@ -2171,6 +2217,10 @@ def export_excel(params: dict[str, list[str]]) -> tuple[bytes, str]:
         "Риск является управленческим индикатором для проверки и не является юридическим выводом.",
     ):
         method_ws.append([line])
+    method_ws.append([])
+    method_ws.append(["Код", "Фактор", "Баллы"])
+    for rule in RISK_RULES:
+        method_ws.append([rule["code"], rule["label"], rule["points"]])
 
     header_fill = PatternFill("solid", fgColor="1F4E78")
     header_font = Font(bold=True, color="FFFFFF")
@@ -2327,6 +2377,12 @@ def export_pdf(params: dict[str, list[str]]) -> tuple[bytes, str]:
         name = str(row.get("short_name") or row.get("object_name") or row.get("object_code") or "Объект без названия")
         return name if len(name) <= 120 else f"{name[:117]}..."
 
+    def risk_factor_text(item: dict) -> str:
+        factors = ((item.get("risk_breakdown") or {}).get("factors") or [])[:3]
+        if factors:
+            return ", ".join(str(factor.get("label") or "") for factor in factors if factor.get("label"))
+        return ", ".join(item.get("reasons") or [])[:160]
+
     def table(data: list[list[object]], widths: list[float] | None = None, risk_column: int | None = None) -> Table:
         converted = [[p(cell, "PdfHeaderCell" if row_index == 0 else "PdfCell") for cell in row] for row_index, row in enumerate(data)]
         result_table = Table(converted, colWidths=widths, repeatRows=1, hAlign="LEFT")
@@ -2396,7 +2452,7 @@ def export_pdf(params: dict[str, list[str]]) -> tuple[bytes, str]:
                     f"{item.get('risk_label', '')} {item.get('risk_score', '')}".strip(),
                     format_money_pdf(item.get("plan")),
                     format_money_pdf(item.get("cash")),
-                    ", ".join(item.get("reasons") or []),
+                    risk_factor_text(item),
                 ]
             )
     else:
@@ -2410,7 +2466,7 @@ def export_pdf(params: dict[str, list[str]]) -> tuple[bytes, str]:
                     f"{item.get('risk_label', '')} {item.get('risk_score', '')}".strip(),
                     format_money_pdf(item.get("plan")),
                     format_money_pdf(item.get("cash")),
-                    ", ".join(item.get("reasons") or []),
+                    risk_factor_text(item),
                 ]
             )
     if len(risk_rows) == 1:
@@ -2431,6 +2487,7 @@ def export_pdf(params: dict[str, list[str]]) -> tuple[bytes, str]:
         "Оплачено = платежи + БУ/АУ",
         "Касса = кассовое исполнение из РЧБ",
         "Риск - управленческий индикатор для приоритизации проверки, не юридический вывод",
+        f"Версия методики риска: {RISK_MODEL_VERSION}",
         "Сравнение использует те же правила состояния на дату." if mode == "compare" else "",
     ):
         if line:
@@ -2481,6 +2538,10 @@ def export_pdf(params: dict[str, list[str]]) -> tuple[bytes, str]:
 def compare_object_summary(row: dict, risk_value: int | None = None, base_row: dict | None = None) -> dict:
     pipeline = row.get("pipeline") or row_pipeline(row)
     score = int(risk_value if risk_value is not None else row.get("risk_score") or 0)
+    breakdown = row.get("risk_breakdown") or risk_breakdown(row)
+    if risk_value is not None and int(breakdown.get("score") or 0) != score:
+        level = risk_level(score)
+        breakdown = {**breakdown, "score": score, "level": level, "label": risk_label(level)}
     payload = {
         "object_key": row.get("object_key", ""),
         "object_name": row.get("object_name") or row.get("object_code") or "Объект без названия",
@@ -2488,6 +2549,7 @@ def compare_object_summary(row: dict, risk_value: int | None = None, base_row: d
         "budget": row.get("budget", ""),
         "risk_score": score,
         "risk_label": risk_label(risk_level(score)),
+        "risk_breakdown": breakdown,
         "plan": float(pipeline.get("plan") or 0),
         "cash": float(pipeline.get("cash") or 0),
         "documents": float(pipeline.get("documents") or 0),
