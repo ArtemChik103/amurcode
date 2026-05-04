@@ -757,6 +757,16 @@ class StaticFilesTests(unittest.TestCase):
         self.assertIn("/api/explain", script)
         self.assertIn("grid-template-columns", styles)
 
+    def test_local_vue_vendor_exists(self):
+        vendor = app.STATIC_DIR / "vendor" / "vue.global.prod.js"
+        self.assertTrue(vendor.exists())
+        self.assertIn("Vue", vendor.read_text(encoding="utf-8"))
+
+    def test_index_uses_local_vue_runtime(self):
+        index = (app.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        self.assertNotIn("unpkg.com/vue", index)
+        self.assertIn("/static/vendor/vue.global.prod.js", index)
+
     def test_vue_frontend_is_declarative(self):
         index = (app.STATIC_DIR / "index.html").read_text(encoding="utf-8")
         script = (app.STATIC_DIR / "app.js").read_text(encoding="utf-8")
