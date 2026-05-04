@@ -815,6 +815,9 @@ createApp({
         return this.openObject(this.topRisks[0]);
       }
       if (action.open === "control") {
+        if (this.mode === "slice") {
+          this.setView("overview");
+        }
         return this.loadControl();
       }
       if (action.open_view) {

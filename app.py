@@ -2419,8 +2419,25 @@ def export_pdf(params: dict[str, list[str]]) -> tuple[bytes, str]:
         p(f"Период/дата: {date_label}", "PdfMeta"),
         p(f"Сформировано: {datetime.now().strftime('%Y-%m-%d %H:%M')}", "PdfMeta"),
         Spacer(1, 5 * mm),
-        p("Что требует внимания", "PdfSection"),
+        p("Решение для руководителя", "PdfSection"),
     ]
+    for bullet in (summary.get("bullets") or [])[:5]:
+        story.append(p(f"• {bullet}"))
+    story.append(p(f"• Проблемных объектов: {problem_count}"))
+
+    executive_risks = []
+    if mode == "compare":
+        executive_risks = change_items[:3]
+    else:
+        executive_risks = (summary.get("top_risks") or [])[:3]
+    for item in executive_risks:
+        risk_text = f"{item.get('risk_label', '')} {item.get('risk_score', '')}".strip()
+        factors_text = risk_factor_text(item)
+        story.append(p(f"• {short_cell(item)}: {risk_text}; {factors_text}"))
+    story.append(p("• Риск является приоритетом ручной проверки, не юридическим выводом."))
+    story.extend([
+        p("Что требует внимания", "PdfSection"),
+    ])
     for bullet in (summary.get("bullets") or [])[:5]:
         story.append(p(f"• {bullet}"))
     story.extend(

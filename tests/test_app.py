@@ -547,6 +547,7 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("application/pdf", content_type)
         self.assertTrue(body.startswith(b"%PDF"))
+        self.assertGreater(len(body), 5000)
 
     def test_excel_export_has_formatting(self):
         content, _ = app.export_excel({"date": ["2026-04-01"], "template": ["skk"]})
@@ -580,7 +581,7 @@ class HttpTests(unittest.TestCase):
         body, filename = app.export_pdf({"date": ["2026-04-01"], "template": ["skk"]})
         self.assertTrue(body.startswith(b"%PDF"))
         self.assertTrue(filename.endswith(".pdf"))
-        self.assertGreater(len(body), 1000)
+        self.assertGreater(len(body), 5000)
 
     def test_pdf_export_compare_returns_pdf(self):
         try:
