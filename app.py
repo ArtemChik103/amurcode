@@ -478,6 +478,114 @@ def quality_summary() -> dict[str, int]:
     }
 
 
+def control_records(params: dict[str, list[str]] | None = None) -> list[dict]:
+    """Возвращает записи для контрольных итогов в семантике текущей выборки."""
+    params = params or {}
+    meaningful = {"date", "template", "q", "code", "budget", "source", "start", "end", "view", "post_filter"}
+    has_filters = any(params.get(key, [""])[0].strip() for key in meaningful if key in params)
+    if not has_filters:
+        return list(STORE.records)
+    if params.get("date", [""])[0].strip() or params.get("view", [""])[0].strip() == "as_of":
+        return select_as_of(STORE.records, params.get("date", [""])[0].strip(), params)
+    return apply_filters(STORE.records, params)
+
+
+def control_summary(params: dict[str, list[str]] | None = None) -> dict:
+    """Собирает контроль загрузки: источники, файлы, связку объектов и предупреждения."""
+    records = control_records(params)
+    source_groups: dict[str, dict] = {}
+    file_groups: dict[str, dict] = {}
+    object_sources: dict[str, set[str]] = defaultdict(set)
+
+    for record in records:
+        source = record.get("source") or "unknown"
+        source_file = record.get("source_file") or ""
+        key = record.get("object_key") or object_group_key(record)
+        object_sources[key].add(source)
+
+        amount = sum(float(record.get(metric) or 0.0) for metric in METRIC_KEYS)
+        source_item = source_groups.setdefault(
+            source,
+            {"source": source, "read_rows": 0, "records": 0, "warnings": 0, "errors": 0, "total_amount": 0.0, "files": set()},
+        )
+        source_item["records"] += 1
+        source_item["read_rows"] += 1
+        source_item["total_amount"] += amount
+        if source_file:
+            source_item["files"].add(source_file)
+
+        file_item = file_groups.setdefault(
+            source_file or "unknown",
+            {"source_file": source_file or "unknown", "read_rows": 0, "records": 0, "warnings": 0, "errors": 0},
+        )
+        file_item["records"] += 1
+        file_item["read_rows"] += 1
+
+    for issue in QUALITY_ISSUES:
+        source_file = issue.get("source_file") or "unknown"
+        if source_file not in file_groups and not params:
+            file_groups[source_file] = {"source_file": source_file, "read_rows": 0, "records": 0, "warnings": 0, "errors": 0}
+        file_item = file_groups.get(source_file)
+        if file_item is not None:
+            if issue.get("severity") == "error":
+                file_item["errors"] += 1
+            else:
+                file_item["warnings"] += 1
+        for source_item in source_groups.values():
+            if source_file in source_item["files"]:
+                if issue.get("severity") == "error":
+                    source_item["errors"] += 1
+                else:
+                    source_item["warnings"] += 1
+
+    load_files = []
+    for key, stats in LOAD_STATS.items():
+        if "/" not in key and "\\" not in key:
+            continue
+        item = dict(file_groups.get(key, {"source_file": key, "read_rows": 0, "records": 0, "warnings": 0, "errors": 0}))
+        if not params:
+            item.update({field: stats.get(field, item.get(field, 0)) for field in ("read_rows", "records", "warnings", "errors")})
+        load_files.append(item)
+    for key, item in file_groups.items():
+        if key != "unknown" and all(existing["source_file"] != key for existing in load_files):
+            load_files.append(item)
+
+    sources = []
+    for item in source_groups.values():
+        files = sorted(item.pop("files"))
+        item["files"] = files
+        item["total_amount"] = round(float(item["total_amount"]), 2)
+        sources.append(item)
+    sources.sort(key=lambda item: item["source"])
+    load_files.sort(key=lambda item: item["source_file"])
+
+    by_name = sum(1 for key in object_sources if str(key).startswith("name:"))
+    with_code = len(object_sources) - by_name
+    single_source = sum(1 for sources_for_object in object_sources.values() if len(sources_for_object) == 1)
+    multi_source = sum(1 for sources_for_object in object_sources.values() if len(sources_for_object) > 1)
+    warnings = quality_summary()["warnings"]
+    errors = quality_summary()["errors"]
+    return {
+        "summary": {
+            "records": len(records),
+            "sources": len(source_groups),
+            "warnings": warnings,
+            "errors": errors,
+            "unmatched_name_keys": by_name,
+            "single_source_objects": single_source,
+        },
+        "sources": sources,
+        "files": load_files,
+        "object_linkage": {
+            "with_code": with_code,
+            "by_name": by_name,
+            "single_source": single_source,
+            "multi_source": multi_source,
+        },
+        "issues": list(QUALITY_ISSUES),
+    }
+
+
 def start_load_stats(path: Path) -> dict[str, int]:
     key = relative_source(path)
     stats = {"read_rows": 0, "records": 0, "warnings": 0, "errors": 0}
@@ -1993,6 +2101,65 @@ def export_excel(params: dict[str, list[str]]) -> tuple[bytes, str]:
             amount,
         ])
 
+    control = control_summary(params)
+    control_ws = wb.create_sheet("Контроль загрузки")
+    control_ws.append(["Итоги загрузки", "", "", "", "", ""])
+    control_ws.append(["Записей", "Источников", "Предупреждений", "Ошибок", "Связано по названию", "Объектов из одного источника"])
+    control_ws.append([
+        control["summary"].get("records", 0),
+        control["summary"].get("sources", 0),
+        control["summary"].get("warnings", 0),
+        control["summary"].get("errors", 0),
+        control["summary"].get("unmatched_name_keys", 0),
+        control["summary"].get("single_source_objects", 0),
+    ])
+    control_ws.append([])
+    control_ws.append(["Источники"])
+    control_ws.append(["Источник", "Прочитано строк", "Записей", "Предупреждений", "Ошибок", "Сумма", "Файлы"])
+    for item in control["sources"]:
+        control_ws.append([
+            item.get("source", ""),
+            item.get("read_rows", 0),
+            item.get("records", 0),
+            item.get("warnings", 0),
+            item.get("errors", 0),
+            item.get("total_amount", 0),
+            ", ".join(item.get("files") or []),
+        ])
+    control_ws.append([])
+    control_ws.append(["Файлы"])
+    control_ws.append(["Файл", "Прочитано строк", "Записей", "Предупреждений", "Ошибок"])
+    for item in control["files"]:
+        control_ws.append([
+            item.get("source_file", ""),
+            item.get("read_rows", 0),
+            item.get("records", 0),
+            item.get("warnings", 0),
+            item.get("errors", 0),
+        ])
+    control_ws.append([])
+    control_ws.append(["Связка объектов"])
+    control_ws.append(["С кодом", "По названию", "Один источник", "Несколько источников"])
+    linkage = control["object_linkage"]
+    control_ws.append([
+        linkage.get("with_code", 0),
+        linkage.get("by_name", 0),
+        linkage.get("single_source", 0),
+        linkage.get("multi_source", 0),
+    ])
+    control_ws.append([])
+    control_ws.append(["Предупреждения качества"])
+    control_ws.append(["Уровень", "Код", "Файл", "Строка", "Поле", "Сообщение"])
+    for issue in control["issues"]:
+        control_ws.append([
+            issue.get("severity", ""),
+            issue.get("code", ""),
+            issue.get("source_file", ""),
+            issue.get("source_row", ""),
+            issue.get("field", ""),
+            issue.get("message", ""),
+        ])
+
     method_ws = wb.create_sheet("Методика")
     for line in (
         "РЧБ и соглашения берутся как последний месячный срез не позже выбранной даты.",
@@ -2021,7 +2188,7 @@ def export_excel(params: dict[str, list[str]]) -> tuple[bytes, str]:
         bottom=Side(style="thin", color="D9E0E4"),
     )
     money_headers = {"Значение", "План", "Документы", "Оплачено", "Касса", "Сумма"}
-    table_sheets = {"Итоги", "Объекты", "Проблемы", "Исходные строки"}
+    table_sheets = {"Итоги", "Объекты", "Проблемы", "Исходные строки", "Контроль загрузки"}
 
     ws = wb["Выводы"]
     ws.freeze_panes = "A4"
@@ -2040,6 +2207,11 @@ def export_excel(params: dict[str, list[str]]) -> tuple[bytes, str]:
                 cell.font = header_font
                 cell.fill = header_fill
                 cell.alignment = Alignment(wrap_text=True, vertical="top")
+        if sheet.title == "Контроль загрузки":
+            for row_number in (1, 5, control_ws.max_row):
+                for cell in sheet[row_number]:
+                    cell.fill = section_fill
+                    cell.font = Font(bold=True, color="1F4E78")
         header_values = [cell.value for cell in sheet[1]]
         money_columns = {index + 1 for index, value in enumerate(header_values) if value in money_headers}
         for row in sheet.iter_rows():
@@ -2491,6 +2663,9 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/readiness":
             self.write_json(readiness_response(parse_qs(parsed.query)))
+            return
+        if parsed.path == "/api/control":
+            self.write_json(control_summary(parse_qs(parsed.query)))
             return
         if parsed.path == "/api/object":
             payload = object_detail(parse_qs(parsed.query))

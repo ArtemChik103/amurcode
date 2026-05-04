@@ -190,6 +190,7 @@ class PlaywrightUiTests(unittest.TestCase):
     def test_demo_60_seconds_flow(self):
         self.click_button("Демо за 60 секунд")
         self.page.get_by_text("Демо-сценарий").wait_for(timeout=10000)
+        self.page.get_by_role("button", name="Показать контроль загрузки").wait_for(timeout=10000)
         self.page.get_by_text("Главные риски").wait_for(timeout=10000)
         self.page.get_by_role("heading", name="Проблемы").wait_for(timeout=10000)
         self.click_button("Открыть главный риск")

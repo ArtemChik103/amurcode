@@ -489,6 +489,19 @@ class HttpTests(unittest.TestCase):
         self.assertIn("raw", payload)
         self.assertIn("human_summary", payload)
 
+    def test_control_endpoint_returns_load_summary(self):
+        status, content_type, body = self.request("/api/control?date=2026-04-01&template=skk")
+        self.assertEqual(status, 200)
+        self.assertIn("application/json", content_type)
+        payload = json.loads(body.decode("utf-8"))
+        self.assertGreater(payload["summary"]["records"], 0)
+        self.assertGreater(payload["summary"]["sources"], 0)
+        self.assertIn("sources", payload)
+        self.assertIn("files", payload)
+        self.assertIn("object_linkage", payload)
+        self.assertIn("issues", payload)
+        self.assertIn("by_name", payload["object_linkage"])
+
     def test_object_and_excel_export_endpoints(self):
         query = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"]})
         object_key = query["rows"][0]["object_key"]
@@ -502,10 +515,12 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", content_type)
         workbook = load_workbook(BytesIO(body), read_only=True)
-        self.assertEqual(workbook.sheetnames, ["Выводы", "Итоги", "Объекты", "Проблемы", "Исходные строки", "Методика"])
+        self.assertEqual(workbook.sheetnames, ["Выводы", "Итоги", "Объекты", "Проблемы", "Исходные строки", "Контроль загрузки", "Методика"])
         self.assertIn("Выводы", workbook.sheetnames)
         method_text = "\n".join(str(row[0] or "") for row in workbook["Методика"].iter_rows(values_only=True))
         self.assertIn("последний месячный срез", method_text)
+        control_text = "\n".join(str(row[0] or "") for row in workbook["Контроль загрузки"].iter_rows(values_only=True))
+        self.assertIn("Итоги загрузки", control_text)
 
         try:
             import reportlab  # noqa: F401
@@ -519,9 +534,10 @@ class HttpTests(unittest.TestCase):
     def test_excel_export_has_formatting(self):
         content, _ = app.export_excel({"date": ["2026-04-01"], "template": ["skk"]})
         workbook = load_workbook(BytesIO(content))
-        self.assertEqual(workbook.sheetnames, ["Выводы", "Итоги", "Объекты", "Проблемы", "Исходные строки", "Методика"])
+        self.assertEqual(workbook.sheetnames, ["Выводы", "Итоги", "Объекты", "Проблемы", "Исходные строки", "Контроль загрузки", "Методика"])
         self.assertEqual(workbook["Выводы"].freeze_panes, "A4")
         self.assertEqual(workbook["Итоги"].freeze_panes, "A2")
+        self.assertEqual(workbook["Контроль загрузки"].freeze_panes, "A2")
         self.assertTrue(workbook["Объекты"].auto_filter.ref)
         self.assertTrue(workbook["Итоги"]["A1"].font.bold)
         self.assertEqual(workbook["Итоги"]["A1"].font.color.rgb, "00FFFFFF")

@@ -52,6 +52,7 @@ createApp({
       },
       quickActions: [],
       readinessOpen: false,
+      controlOpen: false,
       advancedOpen: false,
 
       assistant: {
@@ -114,6 +115,14 @@ createApp({
         checks: [],
       },
 
+      control: {
+        summary: {},
+        sources: [],
+        files: [],
+        object_linkage: {},
+        issues: [],
+      },
+
       compare: {
         base: "",
         target: "",
@@ -138,6 +147,7 @@ createApp({
         trace: false,
         object: false,
         explain: false,
+        control: false,
       },
 
       error: "",
@@ -409,6 +419,16 @@ createApp({
     demoReadiness() {
       return this.readiness.checks || [];
     },
+
+    controlWarnings() {
+      const summary = this.control.summary || {};
+      return [
+        `Связано по названию: ${summary.unmatched_name_keys || 0}`,
+        `Только один источник: ${summary.single_source_objects || 0}`,
+        `Предупреждений: ${summary.warnings || 0}`,
+        `Ошибок: ${summary.errors || 0}`,
+      ];
+    },
   },
 
   watch: {
@@ -518,6 +538,7 @@ createApp({
         if (requestId !== this.loadRequestId || this.mode !== "slice") return;
         this.query = query;
         this.readiness = readiness;
+        if (this.controlOpen) this.loadControl();
         await nextTick();
         this.drawChart();
         this.drawFunnelChart();
@@ -551,6 +572,32 @@ createApp({
       } finally {
         if (requestId === this.loadRequestId) this.loading.compare = false;
       }
+    },
+
+    async loadControl() {
+      this.loading.control = true;
+      this.error = "";
+      try {
+        const params = this.buildQueryParams(this.mode !== "compare");
+        if (this.mode === "compare") {
+          params.set("date", this.filters.target || "");
+        }
+        this.control = await fetchJson(`/api/control?${params.toString()}`);
+        this.controlOpen = true;
+      } catch (error) {
+        console.error(error);
+        this.error = "Не удалось загрузить контроль загрузки.";
+      } finally {
+        this.loading.control = false;
+      }
+    },
+
+    toggleControl() {
+      if (this.controlOpen) {
+        this.controlOpen = false;
+        return;
+      }
+      return this.loadControl();
     },
 
     buildQueryParams(includeDates) {
@@ -766,6 +813,9 @@ createApp({
       }
       if (action.open === "top_risk" && this.topRisks[0]) {
         return this.openObject(this.topRisks[0]);
+      }
+      if (action.open === "control") {
+        return this.loadControl();
       }
       if (action.open_view) {
         this.setView(action.open_view);

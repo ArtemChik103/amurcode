@@ -205,6 +205,7 @@
           <strong>Демо-сценарий</strong>
           <span>1. Посмотрите вывод 2. Откройте главный риск 3. Покажите источник цифр 4. Скачайте Excel</span>
           <button type="button" class="ghost" @click="runFollowup({ open: 'top_risk' })">Открыть главный риск</button>
+          <button type="button" class="ghost" @click="runFollowup({ open: 'control' })">Показать контроль загрузки</button>
           <button type="button" class="ghost" @click="exportPdf">Скачать PDF</button>
           <button type="button" class="ghost" @click="exportExcel">Скачать Excel</button>
         </section>
@@ -242,7 +243,12 @@
                 <h3>Движение по датам</h3>
                 <p>{{ query.count || 0 }} строк в выборке</p>
               </div>
-              <button type="button" class="ghost" @click="readinessOpen = !readinessOpen">Проверить перед показом</button>
+              <div class="panel-actions">
+                <button type="button" class="ghost" @click="readinessOpen = !readinessOpen">Проверить перед показом</button>
+                <button type="button" class="ghost" @click="toggleControl" :disabled="loading.control">
+                  {{ loading.control ? 'Загрузка...' : 'Контроль загрузки' }}
+                </button>
+              </div>
             </div>
             <canvas ref="chart" height="280"></canvas>
           </article>
@@ -292,6 +298,50 @@
                 <span>{{ item.status === 'ok' ? '✓' : '!' }}</span>
                 <strong>{{ item.label }}</strong>
                 <small>{{ item.message }}</small>
+              </div>
+            </div>
+          </article>
+
+          <article v-if="controlOpen" class="panel control-panel">
+            <div class="panel-head">
+              <div>
+                <h3>Контроль загрузки</h3>
+                <p>{{ control.summary.records || 0 }} строк · {{ control.summary.sources || 0 }} источников</p>
+              </div>
+              <button type="button" class="ghost compact-button" @click="controlOpen = false">Скрыть</button>
+            </div>
+            <div class="control-summary">
+              <span v-for="item in controlWarnings" :key="item" class="pill">{{ item }}</span>
+            </div>
+            <div class="table-wrap compact">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Источник</th>
+                    <th class="number">Строк</th>
+                    <th class="number">Записей</th>
+                    <th class="number">Предупреждений</th>
+                    <th class="number">Ошибок</th>
+                    <th class="number">Сумма</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="item in control.sources" :key="item.source">
+                    <td>{{ item.source }}</td>
+                    <td class="number">{{ item.read_rows }}</td>
+                    <td class="number">{{ item.records }}</td>
+                    <td class="number">{{ item.warnings }}</td>
+                    <td class="number">{{ item.errors }}</td>
+                    <td class="number">{{ formatMoney(item.total_amount) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div v-if="control.issues.length" class="readiness-list">
+              <div v-for="issue in control.issues.slice(0, 6)" :key="issue.source_file + issue.source_row + issue.code" class="warn">
+                <span>!</span>
+                <strong>{{ issue.message }}</strong>
+                <small>{{ issue.source_file }} · строка {{ issue.source_row }}</small>
               </div>
             </div>
           </article>

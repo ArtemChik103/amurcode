@@ -836,6 +836,7 @@ label span,
 
   .workspace-grid .chart-panel:first-child,
   .workspace-grid .readiness-panel,
+  .workspace-grid .control-panel,
   .workspace-grid .table-panel {
     grid-column: 1 / -1;
   }
@@ -882,6 +883,19 @@ label span,
   margin-top: 4px;
   color: var(--muted);
   font-size: 12px;
+}
+
+.panel-actions,
+.control-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.control-summary {
+  justify-content: flex-start;
+  padding: 14px 16px 0;
 }
 
 .chart-panel {
