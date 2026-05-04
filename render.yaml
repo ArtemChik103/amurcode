@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: expense-analytics
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    envVars:
+      - key: ASSISTANT_ENABLED
+        value: auto
+      - key: GROQ_MODEL
+        value: openai/gpt-oss-120b

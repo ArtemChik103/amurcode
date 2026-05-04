@@ -42,9 +42,14 @@ createApp({
       mode: "slice",
       theme: "dark",
       currentView: "overview",
-      smartInput: "",
-      smartSuggestions: [],
-      selectedSuggestion: null,
+      command: {
+        text: "",
+        loading: false,
+        response: null,
+        suggestions: [],
+        source: "",
+        error: "",
+      },
       quickActions: [],
       readinessOpen: false,
       advancedOpen: false,
@@ -132,18 +137,23 @@ createApp({
         compare: false,
         trace: false,
         object: false,
+        explain: false,
       },
 
       error: "",
+      explanation: null,
+      demoMode: "",
       debounceTimer: null,
       chartRedraw: null,
       initialized: false,
+      loadRequestId: 0,
       pendingResultScroll: false,
       suppressAutoLoad: false,
       expandedPipelines: {},
       objectCard: null,
       objectRowsOpen: false,
       problemRiskFilter: "all",
+      riskHelpOpen: false,
     };
   },
 
@@ -268,6 +278,49 @@ createApp({
       return this.buildPipeline(totals);
     },
 
+    resultNextActions() {
+      if (this.mode === "compare") return this.compare.compare_insights?.next_actions || [];
+      return this.query.attention_summary?.next_actions || [];
+    },
+
+    funnelValues() {
+      return this.simpleTotals;
+    },
+
+    riskDistribution() {
+      return this.simpleRows.reduce((acc, row) => {
+        const level = row.risk_level || "low";
+        acc[level] = (acc[level] || 0) + 1;
+        return acc;
+      }, { critical: 0, high: 0, medium: 0, low: 0 });
+    },
+
+    riskHelpSummary() {
+      const dist = this.riskDistribution;
+      const total = Object.values(dist).reduce((sum, value) => sum + Number(value || 0), 0);
+      return {
+        total,
+        critical: dist.critical || 0,
+        high: dist.high || 0,
+        medium: dist.medium || 0,
+        low: dist.low || 0,
+        rules: [
+          "Критичный: от 75",
+          "Высокий: от 50",
+          "Средний: от 25",
+          "Низкий: ниже 25",
+        ],
+        reasons: [
+          "нет кассы",
+          "нет оплат",
+          "нет документов",
+          "низкая касса",
+          "разрыв источников",
+          "крупный план",
+        ],
+      };
+    },
+
     hasProblems() {
       return this.problemRows.length > 0;
     },
@@ -386,14 +439,22 @@ createApp({
       },
     },
     currentView() {
-      nextTick(() => this.drawChart());
+      nextTick(() => {
+        this.drawChart();
+        this.drawFunnelChart();
+        this.drawRiskChart();
+      });
     },
   },
 
   async mounted() {
     this.theme = localStorage.getItem("analytics-theme") || "dark";
     this.applyTheme();
-    this.chartRedraw = debounce(() => this.drawChart(), 200);
+    this.chartRedraw = debounce(() => {
+      this.drawChart();
+      this.drawFunnelChart();
+      this.drawRiskChart();
+    }, 200);
     await this.loadInitialData();
     this.initialized = true;
     await this.loadData();
@@ -441,8 +502,9 @@ createApp({
 
     async loadData() {
       // В режиме среза основной результат и readiness идут одним набором параметров.
+      const requestId = ++this.loadRequestId;
       if (this.mode === "compare") {
-        await this.loadCompare();
+        await this.loadCompare(requestId);
         return;
       }
       this.loading.query = true;
@@ -453,34 +515,41 @@ createApp({
           fetchJson(`/api/query?${params.toString()}`),
           fetchJson(`/api/readiness?${params.toString()}`),
         ]);
+        if (requestId !== this.loadRequestId || this.mode !== "slice") return;
         this.query = query;
         this.readiness = readiness;
         await nextTick();
         this.drawChart();
+        this.drawFunnelChart();
+        this.drawRiskChart();
         await this.scrollToResultsIfNeeded();
       } catch (error) {
+        if (requestId !== this.loadRequestId) return;
         console.error(error);
         this.error = "Не удалось загрузить данные. Проверьте параметры запроса.";
       } finally {
-        this.loading.query = false;
+        if (requestId === this.loadRequestId) this.loading.query = false;
       }
     },
 
-    async loadCompare() {
+    async loadCompare(requestId = ++this.loadRequestId) {
       this.loading.compare = true;
       this.error = "";
       try {
         const params = this.buildQueryParams(false);
         if (this.filters.base) params.set("base", this.filters.base);
         if (this.filters.target) params.set("target", this.filters.target);
-        this.compare = await fetchJson(`/api/compare?${params.toString()}`);
+        const compare = await fetchJson(`/api/compare?${params.toString()}`);
+        if (requestId !== this.loadRequestId || this.mode !== "compare") return;
+        this.compare = compare;
         await nextTick();
         await this.scrollToResultsIfNeeded();
       } catch (error) {
+        if (requestId !== this.loadRequestId) return;
         console.error(error);
         this.error = "Не удалось загрузить сравнение. Проверьте параметры запроса.";
       } finally {
-        this.loading.compare = false;
+        if (requestId === this.loadRequestId) this.loading.compare = false;
       }
     },
 
@@ -539,11 +608,12 @@ createApp({
       }, { scrollToResults: true });
     },
 
-    onSmartInput() {
-      this.smartSuggestions = this.buildSmartSuggestions(this.smartInput);
+    onCommandInput() {
+      this.command.error = "";
+      this.command.suggestions = this.buildCommandSuggestions(this.command.text);
     },
 
-    buildSmartSuggestions(text) {
+    buildCommandSuggestions(text) {
       // Умная строка не вызывает LLM: она распознает частые бюджетные сценарии
       // и превращает их в те же actions, что быстрые кнопки и assistant.
       const value = String(text || "").trim();
@@ -605,15 +675,67 @@ createApp({
       return suggestions;
     },
 
+    async runCommand() {
+      const text = String(this.command.text || "").trim();
+      if (!text) return;
+      this.command.loading = true;
+      this.command.error = "";
+      this.command.response = null;
+      try {
+        const response = await fetchJson("/api/assistant", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            message: text,
+            context: {
+              mode: this.mode,
+              template: this.filters.template,
+              date: this.filters.date,
+              selected_metrics: this.activeMetricCodes,
+              available_dates: this.activeDateValues,
+            },
+          }),
+        });
+        await this.applyCommandResponse(response);
+      } catch (error) {
+        console.error(error);
+        this.command.suggestions = this.buildCommandSuggestions(text);
+        if (this.command.suggestions[0]) {
+          await this.applyCommandSuggestion(this.command.suggestions[0]);
+        } else {
+          this.command.error = "Не удалось разобрать запрос. Попробуйте уточнить объект, код или сценарий.";
+        }
+      } finally {
+        this.command.loading = false;
+      }
+    },
+
+    async applyCommandResponse(response) {
+      this.command.response = response;
+      this.command.source = response?.mode || "";
+      this.assistant.response = response;
+      this.assistant.history.unshift({ question: this.command.text, response });
+      await this.applyAction(response?.action || {}, { scrollToResults: true });
+    },
+
+    applyCommandSuggestion(suggestion) {
+      return this.applyAction(suggestion.action || {}, { scrollToResults: true });
+    },
+
+    onSmartInput() {
+      this.onCommandInput();
+    },
+
+    buildSmartSuggestions(text) {
+      return this.buildCommandSuggestions(text);
+    },
+
     applyFirstSuggestion() {
-      if (!this.smartSuggestions.length) this.onSmartInput();
-      if (this.smartSuggestions[0]) return this.applySmartSuggestion(this.smartSuggestions[0]);
-      return Promise.resolve();
+      return this.runCommand();
     },
 
     applySmartSuggestion(suggestion) {
-      this.selectedSuggestion = suggestion;
-      return this.applyAction(suggestion.action || {}, { scrollToResults: true });
+      return this.applyCommandSuggestion(suggestion);
     },
 
     cleanSmartText(value) {
@@ -624,37 +746,72 @@ createApp({
     },
 
     async askAssistant() {
-      // Assistant получает только контекст фильтров и дат; исходные строки остаются на backend.
-      if (!this.assistant.message) return;
-      this.assistant.loading = true;
-      this.assistant.response = null;
-      this.error = "";
-      try {
-        const response = await fetchJson("/api/assistant", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            message: this.assistant.message,
-            context: {
-              mode: this.mode,
-              template: this.filters.template,
-              selected_metrics: this.activeMetricCodes,
-              available_dates: this.activeDateValues,
-            },
-          }),
-        });
-        this.assistant.response = response;
-        this.assistant.history.unshift({ question: this.assistant.message, response });
-      } catch (error) {
-        console.error(error);
-        this.error = "Помощник недоступен. Можно использовать быстрые действия или умную строку.";
-      } finally {
-        this.assistant.loading = false;
-      }
+      this.command.text = this.assistant.message || this.command.text;
+      return this.runCommand();
     },
 
     applyAssistantAction(action) {
       return this.applyAction(action || {}, { scrollToResults: true });
+    },
+
+    runFollowup(action) {
+      if (!action) return Promise.resolve();
+      if (action.download === "excel") {
+        this.exportExcel();
+        return Promise.resolve();
+      }
+      if (action.download === "pdf") {
+        this.exportPdf();
+        return Promise.resolve();
+      }
+      if (action.open === "top_risk" && this.topRisks[0]) {
+        return this.openObject(this.topRisks[0]);
+      }
+      if (action.open_view) {
+        this.setView(action.open_view);
+      }
+      if (action.post_filter) {
+        return this.applyProblemFilter(action.post_filter);
+      }
+      return Promise.resolve();
+    },
+
+    async explainResult() {
+      this.loading.explain = true;
+      this.error = "";
+      try {
+        const payload = {
+          attention_summary: this.query.attention_summary || {},
+          compare_insights: this.compare.compare_insights || {},
+          readiness: this.readiness || {},
+          top_risks: this.topRisks.slice(0, 5).map((item) => ({
+            object_key: item.object_key,
+            object_name: item.object_name,
+            risk_score: item.risk_score,
+            risk_label: item.risk_label,
+            plan: item.plan,
+            reasons: item.reasons || item.problem_reasons || [],
+          })),
+          filters: {
+            mode: this.mode,
+            template: this.filters.template,
+            date: this.filters.date,
+            base: this.filters.base,
+            target: this.filters.target,
+            post_filter: this.filters.post_filter,
+          },
+        };
+        this.explanation = await fetchJson("/api/explain", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ kind: this.mode === "compare" ? "compare" : "query", payload }),
+        });
+      } catch (error) {
+        console.error(error);
+        this.error = "Не удалось получить простое объяснение.";
+      } finally {
+        this.loading.explain = false;
+      }
     },
 
     async applyAction(action, options = {}) {
@@ -666,6 +823,7 @@ createApp({
           this.filters.source = "";
           this.filters.post_filter = "";
         }
+        this.demoMode = action.demo_mode === "skk_risks" ? "skk_risks" : "";
         if (action.mode) this.mode = action.mode;
         if (action.template) this.filters.template = action.template;
         if (action.q !== undefined) this.filters.q = action.q;
@@ -682,6 +840,7 @@ createApp({
           this.filters.date = action.date || this.filters.date || this.activeDateValues.at(-1) || "";
           this.currentView = action.open_view || (action.post_filter ? "problems" : "overview");
         }
+        this.explanation = null;
       }, shouldScroll);
     },
 
@@ -712,7 +871,11 @@ createApp({
       this.theme = this.theme === "dark" ? "light" : "dark";
       localStorage.setItem("analytics-theme", this.theme);
       this.applyTheme();
-      nextTick(() => this.drawChart());
+      nextTick(() => {
+        this.drawChart();
+        this.drawFunnelChart();
+        this.drawRiskChart();
+      });
     },
 
     applyTheme() {
@@ -788,6 +951,139 @@ createApp({
       ctx.stroke();
     },
 
+    prepareCanvas(canvas, fallbackHeight = 220) {
+      if (!canvas) return null;
+      const ratio = window.devicePixelRatio || 1;
+      const width = canvas.clientWidth || canvas.parentElement?.clientWidth || 420;
+      const height = canvas.clientHeight || Number(canvas.getAttribute("height")) || fallbackHeight;
+      canvas.width = Math.floor(width * ratio);
+      canvas.height = Math.floor(height * ratio);
+      const ctx = canvas.getContext("2d");
+      ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+      ctx.clearRect(0, 0, width, height);
+      return { ctx, width, height };
+    },
+
+    drawNoData(ctx, width, height) {
+      const styles = getComputedStyle(document.documentElement);
+      ctx.fillStyle = styles.getPropertyValue("--chart-text").trim() || "#63717b";
+      ctx.font = "14px Arial";
+      ctx.textAlign = "center";
+      ctx.fillText("Нет данных", width / 2, height / 2);
+      ctx.textAlign = "left";
+    },
+
+    drawFunnelChart() {
+      const prepared = this.prepareCanvas(this.$refs.funnelChart, 210);
+      if (!prepared || this.mode !== "slice" || this.currentView !== "overview") return;
+      const { ctx, width, height } = prepared;
+      const styles = getComputedStyle(document.documentElement);
+      const text = styles.getPropertyValue("--chart-text").trim() || "#63717b";
+      const grid = styles.getPropertyValue("--chart-grid").trim() || "#d9e0e4";
+      const accent = styles.getPropertyValue("--accent").trim() || "#0f766e";
+      const blue = styles.getPropertyValue("--blue").trim() || "#2563eb";
+      const warn = styles.getPropertyValue("--warn").trim() || "#d97706";
+      const values = [
+        ["План", Number(this.funnelValues.plan || 0)],
+        ["Документы", Number(this.funnelValues.documents || 0)],
+        ["Оплачено", Number(this.funnelValues.paid || 0)],
+        ["Касса", Number(this.funnelValues.cash || 0)],
+      ];
+      const max = Math.max(...values.map((item) => item[1]));
+      if (!max) {
+        this.drawNoData(ctx, width, height);
+        return;
+      }
+      const colors = [accent, accent, warn, blue];
+      const left = 112;
+      const right = 28;
+      const top = 18;
+      const barHeight = 18;
+      const gap = 25;
+      const usable = Math.max(120, width - left - right);
+      ctx.strokeStyle = grid;
+      ctx.lineWidth = 1;
+      [0, 0.5, 1].forEach((tick) => {
+        const x = left + usable * tick;
+        ctx.beginPath();
+        ctx.moveTo(x, top - 6);
+        ctx.lineTo(x, top + values.length * (barHeight + gap) - gap + 9);
+        ctx.stroke();
+      });
+      values.forEach(([label, value], index) => {
+        const y = top + index * (barHeight + gap);
+        const barWidth = Math.max(value ? 4 : 0, usable * (value / max));
+        const percent = max ? Math.round((value / max) * 100) : 0;
+        ctx.fillStyle = "rgba(148, 163, 184, 0.16)";
+        ctx.fillRect(left, y, usable, barHeight);
+        ctx.fillStyle = colors[index];
+        ctx.fillRect(left, y, barWidth, barHeight);
+        ctx.fillStyle = text;
+        ctx.font = "600 12px Arial";
+        ctx.fillText(label, 14, y + 14);
+        ctx.font = "12px Arial";
+        ctx.fillText(`${percent}%`, left + usable - 34, y + 14);
+        ctx.fillText(this.formatMoney(value), left, y + barHeight + 16);
+      });
+    },
+
+    drawRiskChart() {
+      const prepared = this.prepareCanvas(this.$refs.riskChart, 210);
+      if (!prepared || this.mode !== "slice" || this.currentView !== "overview") return;
+      const { ctx, width, height } = prepared;
+      const styles = getComputedStyle(document.documentElement);
+      const text = styles.getPropertyValue("--chart-text").trim() || "#63717b";
+      const grid = styles.getPropertyValue("--chart-grid").trim() || "#d9e0e4";
+      const colors = {
+        critical: styles.getPropertyValue("--danger").trim() || "#dc2626",
+        high: "#f97316",
+        medium: styles.getPropertyValue("--warn").trim() || "#d97706",
+        low: styles.getPropertyValue("--accent").trim() || "#0f766e",
+      };
+      const labels = [
+        ["critical", "Критичные"],
+        ["high", "Высокие"],
+        ["medium", "Средние"],
+        ["low", "Низкие"],
+      ];
+      const values = labels.map(([key, label]) => [key, label, Number(this.riskDistribution[key] || 0)]);
+      const total = values.reduce((sum, item) => sum + item[2], 0);
+      if (!total) {
+        this.drawNoData(ctx, width, height);
+        return;
+      }
+      const left = 116;
+      const right = 34;
+      const top = 20;
+      const barHeight = 20;
+      const gap = 22;
+      const usable = Math.max(120, width - left - right);
+      const max = Math.max(...values.map((item) => item[2]), 1);
+      ctx.strokeStyle = grid;
+      ctx.lineWidth = 1;
+      [0, 0.5, 1].forEach((tick) => {
+        const x = left + usable * tick;
+        ctx.beginPath();
+        ctx.moveTo(x, top - 6);
+        ctx.lineTo(x, top + values.length * (barHeight + gap) - gap + 8);
+        ctx.stroke();
+      });
+      values.forEach(([key, label, value], index) => {
+        const y = top + index * (barHeight + gap);
+        const barWidth = Math.max(value ? 4 : 0, usable * (value / max));
+        const percent = Math.round((value / total) * 100);
+        ctx.fillStyle = "rgba(148, 163, 184, 0.16)";
+        ctx.fillRect(left, y, usable, barHeight);
+        ctx.fillStyle = colors[key];
+        ctx.fillRect(left, y, barWidth, barHeight);
+        ctx.fillStyle = text;
+        ctx.font = "600 12px Arial";
+        ctx.fillText(label, 14, y + 15);
+        ctx.font = "12px Arial";
+        ctx.fillText(`${value} · ${percent}%`, left + Math.min(usable - 58, Math.max(barWidth + 8, 8)), y + 15);
+      });
+    },
+
     setMode(mode) {
       if (!["slice", "compare"].includes(mode) || this.mode === mode) return;
       this.mode = mode;
@@ -797,7 +1093,11 @@ createApp({
 
     setView(view) {
       this.currentView = view;
-      nextTick(() => this.drawChart());
+      nextTick(() => {
+        this.drawChart();
+        this.drawFunnelChart();
+        this.drawRiskChart();
+      });
     },
 
     resetFilters() {
@@ -807,8 +1107,12 @@ createApp({
       this.filters.budget = "";
       this.filters.source = "";
       this.filters.post_filter = "";
-      this.smartInput = "";
-      this.smartSuggestions = [];
+      this.command.text = "";
+      this.command.suggestions = [];
+      this.command.response = null;
+      this.command.source = "";
+      this.explanation = null;
+      this.demoMode = "";
       this.loadData();
     },
 
@@ -858,6 +1162,18 @@ createApp({
         params.set("date", this.filters.date);
       }
       window.location.href = `/api/export.xlsx?${params.toString()}`;
+    },
+
+    exportPdf() {
+      const params = this.buildQueryParams(this.mode !== "compare");
+      if (this.mode === "compare") {
+        params.set("mode", "compare");
+        if (this.filters.base) params.set("base", this.filters.base);
+        if (this.filters.target) params.set("target", this.filters.target);
+      } else if (this.filters.date) {
+        params.set("date", this.filters.date);
+      }
+      window.location.href = `/api/export.pdf?${params.toString()}`;
     },
 
     exportCsv() {

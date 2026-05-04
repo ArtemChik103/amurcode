@@ -58,6 +58,7 @@ const context = {
   window: {
     devicePixelRatio: 1,
     onresize: null,
+    location: { href: "" },
   },
   getComputedStyle() {
     return {
@@ -92,8 +93,16 @@ context.fetch = async (url, options = {}) => {
         intent: "run_query",
         message: "Я понял запрос как выборку: СКК.",
         action: { mode: "slice", template: "skk", q: "Благовещенск", metrics: ["limit", "cash"] },
+        followups: [{ label: "Скачать Excel", action: { download: "excel" } }],
         alternatives: [{ label: "Искать во всех данных", action: { mode: "slice", template: "all", q: "Благовещенск", code: "", budget: "", source: "", post_filter: "", reset_scope: true } }],
       }),
+    };
+  }
+  if (String(url).startsWith("/api/explain")) {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ mode: "rule_based", title: "Короткое объяснение", bullets: ["Сначала проверьте кассу."], next_actions: [] }),
     };
   }
   if (String(url).startsWith("/api/trace")) {
@@ -193,11 +202,24 @@ function makeInstance() {
     details: [{ id: "r1", event_date: "2026-04-01", source: "РЧБ", object_code: "101016105", object_name: "СКК объект", cash: 10 }],
     timeline: [{ date: "2026-04-01", limit: 100, cash: 10 }],
     count: 1,
+    attention_summary: {
+      title: "Найдено: что требует внимания",
+      severity: "warning",
+      bullets: ["Есть объекты с низкой кассой."],
+      next_actions: [{ label: "Скачать Excel", action: { download: "excel" } }],
+      top_risks: [],
+    },
   };
   instance.compare = {
     rows: [
       { object_code: "101016105", object_name: "СКК объект", budget: "", metrics: { limit: { base: 1, target: 3, delta: 2, delta_percent: 200 }, cash: { base: 2, target: 1, delta: -1, delta_percent: -50 } }, total_delta: 3 },
     ],
+    compare_insights: {
+      title: "Изменения за период",
+      severity: "normal",
+      bullets: ["Нет существенных изменений."],
+      next_actions: [{ label: "Показать новые проблемы", action: { open_view: "changes" } }],
+    },
   };
   for (const [name, getter] of Object.entries(capturedOptions.computed)) {
     Object.defineProperty(instance, name, { get: getter.bind(instance), configurable: true });
@@ -211,6 +233,8 @@ function makeInstance() {
     await this.scrollToResultsIfNeeded();
   };
   instance.drawChart = function drawChartMock() {};
+  instance.drawFunnelChart = function drawFunnelChartMock() {};
+  instance.drawRiskChart = function drawRiskChartMock() {};
   return instance;
 }
 
@@ -239,6 +263,12 @@ function makeInstance() {
   assert.equal(vmApp.loadCalls, 1);
   assert.equal(scrollCalls, 1);
   assert.equal(vmApp.pendingResultScroll, false);
+  assert.equal(vmApp.resultNextActions[0].label, "Скачать Excel");
+  assert.equal(vmApp.funnelValues.plan, 120);
+  assert.equal(vmApp.riskDistribution.low, 1);
+  assert.equal(vmApp.riskHelpOpen, false);
+  assert.equal(vmApp.riskHelpSummary.total, 1);
+  assert.equal(vmApp.riskHelpSummary.low, 1);
 
   scrollCalls = 0;
   await vmApp.applyQuickAction({ mode: "compare", template: "skk", metrics: ["limit"] });
@@ -247,6 +277,10 @@ function makeInstance() {
   assert.equal(vmApp.filters.base, "2025-02-01");
   assert.equal(vmApp.filters.target, "2026-04-01");
   assert.equal(scrollCalls, 1);
+  assert.equal(vmApp.resultNextActions[0].label, "Показать новые проблемы");
+
+  await vmApp.applyAction({ mode: "slice", template: "skk", demo_mode: "skk_risks" }, { scrollToResults: false });
+  assert.equal(vmApp.demoMode, "skk_risks");
 
   const params = vmApp.buildQueryParams(true);
   assert.equal(params.get("template"), "skk");
@@ -263,11 +297,11 @@ function makeInstance() {
   assert.equal(vmApp.buildSmartSuggestions("Благовещенск").at(-1).action.q, "Благовещенск");
 
   vmApp.mode = "slice";
-  vmApp.smartInput = "6105";
-  vmApp.onSmartInput();
-  assert.ok(vmApp.smartSuggestions.length > 0);
+  vmApp.command.text = "6105";
+  vmApp.onCommandInput();
+  assert.ok(vmApp.command.suggestions.length > 0);
   scrollCalls = 0;
-  await vmApp.applyFirstSuggestion();
+  await vmApp.applyCommandSuggestion(vmApp.command.suggestions[0]);
   assert.equal(vmApp.filters.template, "skk");
   assert.equal(scrollCalls, 1);
 
@@ -307,16 +341,15 @@ function makeInstance() {
   assert.equal(vmApp.resultNarrative.severity, "normal");
   assert.match(vmApp.resultNarrative.title, /Изменения/);
 
-  vmApp.assistant.message = "покажи СКК";
-  await vmApp.askAssistant();
-  assert.equal(lastFetch.url, "/api/assistant");
-  assert.equal(vmApp.assistant.response.action.template, "skk");
+  vmApp.command.text = "покажи СКК";
+  await vmApp.runCommand();
+  assert.equal(vmApp.command.response.action.template, "skk");
   vmApp.filters.code = "6105";
   vmApp.filters.budget = "Областной бюджет";
   vmApp.filters.source = "РЧБ";
   vmApp.filters.post_filter = "low_cash";
   scrollCalls = 0;
-  await vmApp.applyAssistantAction(vmApp.assistant.response.alternatives[0].action);
+  await vmApp.applyAssistantAction(vmApp.command.response.alternatives[0].action);
   assert.equal(vmApp.filters.template, "all");
   assert.equal(vmApp.filters.code, "");
   assert.equal(vmApp.filters.budget, "");
@@ -324,10 +357,14 @@ function makeInstance() {
   assert.equal(vmApp.filters.post_filter, "");
   assert.equal(scrollCalls, 1);
   scrollCalls = 0;
-  await vmApp.applyAssistantAction(vmApp.assistant.response.action);
+  await vmApp.applyAssistantAction(vmApp.command.response.action);
   assert.equal(vmApp.filters.template, "skk");
   assert.equal(vmApp.filters.q, "Благовещенск");
   assert.equal(scrollCalls, 1);
+
+  await vmApp.explainResult();
+  assert.equal(lastFetch.url, "/api/explain");
+  assert.equal(vmApp.explanation.title, "Короткое объяснение");
 
   vmApp.requestResultScroll();
   assert.equal(vmApp.pendingResultScroll, true);
@@ -353,6 +390,16 @@ function makeInstance() {
   vmApp.mode = "compare";
   vmApp.exportCsv();
   assert.match(emittedDownloads.at(-1).download, /analytics_compare_skk_2025-02-01_2026-04-01/);
+
+  vmApp.mode = "slice";
+  vmApp.filters.template = "skk";
+  vmApp.filters.date = "2026-04-01";
+  vmApp.exportPdf();
+  assert.match(context.window.location.href, /^\/api\/export\.pdf\?/);
+  assert.match(context.window.location.href, /template=skk/);
+  context.window.location.href = "";
+  await vmApp.runFollowup({ download: "pdf" });
+  assert.match(context.window.location.href, /^\/api\/export\.pdf\?/);
 
   vmApp.setMode("slice");
   assert.equal(vmApp.currentView, "overview");

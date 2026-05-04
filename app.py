@@ -19,6 +19,7 @@ from datetime import datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 
@@ -28,6 +29,23 @@ STATIC_DIR = ROOT / "static"
 RAG_DIR = ROOT / "docs" / "rag"
 QUALITY_ISSUES: list[dict] = []
 LOAD_STATS: dict[str, dict[str, int]] = {}
+
+
+def load_local_env(path: Path = ROOT / ".env") -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+load_local_env()
 
 # Метрики хранятся в едином порядке, чтобы backend, UI и Excel одинаково
 # трактовали выбранные суммы.
@@ -52,6 +70,17 @@ TEMPLATES = {
 # Быстрые действия являются контрактом между API и первым экраном UI:
 # каждое действие разворачивается в обычные query/compare параметры.
 QUICK_ACTIONS = {
+    "demo_60s": {
+        "label": "Демо за 60 секунд",
+        "description": "Показать проблемные СКК, главный риск и отчет",
+        "mode": "slice",
+        "template": "skk",
+        "post_filter": "execution_problems",
+        "open_view": "problems",
+        "highlight": "top_risks",
+        "demo_mode": "skk_risks",
+        "metrics": ["limit", "obligation", "cash", "agreement", "contract", "payment", "buau"],
+    },
     "show_skk": {
         "label": "Собрать отчет СКК",
         "description": "Готовая выборка по СКК на выбранную дату",
@@ -116,13 +145,42 @@ QUICK_ACTIONS = {
 ASSISTANT_INTENTS = {
     "run_query",
     "run_compare",
+    "show_execution_problems",
+    "find_object",
+    "open_object",
+    "export_excel",
     "explain_metric",
     "explain_template",
-    "find_object",
-    "show_execution_problems",
-    "show_source",
+    "explain_result",
     "help",
 }
+ASSISTANT_POST_FILTERS = {
+    "",
+    "execution_problems",
+    "no_documents",
+    "no_payments",
+    "no_cash",
+    "low_cash",
+    "data_gap",
+}
+ASSISTANT_OPEN_VIEWS = {"overview", "objects", "problems", "records", "changes"}
+ASSISTANT_ACTION_FIELDS = {
+    "mode",
+    "template",
+    "date",
+    "base",
+    "target",
+    "q",
+    "code",
+    "budget",
+    "source",
+    "post_filter",
+    "metrics",
+    "open_view",
+    "reset_scope",
+}
+ASSISTANT_FOLLOWUP_FIELDS = {"label", "action"}
+ASSISTANT_FOLLOWUP_ACTION_FIELDS = {"open", "download", "post_filter", "open_view"}
 CAPITAL_KVR = {"400", "410", "411", "412", "413", "414", "415", "416", "417"}
 
 SNAPSHOT_RE = re.compile(r"на\s+(\d{2}\.\d{2}\.\d{4})")
@@ -875,6 +933,70 @@ def risk_explanation(row: dict) -> list[str]:
     return explanation[:4]
 
 
+def short_object_name(row: dict) -> str:
+    name = str(row.get("object_name") or row.get("object_code") or "Объект без названия")
+    return name if len(name) <= 95 else f"{name[:92]}..."
+
+
+def top_risk_payload(row: dict) -> dict:
+    pipeline = row.get("pipeline") or row_pipeline(row)
+    return {
+        "object_key": row.get("object_key", ""),
+        "object_code": row.get("object_code", ""),
+        "object_name": row.get("object_name") or row.get("object_code") or "Объект без названия",
+        "short_name": short_object_name(row),
+        "budget": row.get("budget", ""),
+        "risk_score": int(row.get("risk_score") or 0),
+        "risk_label": row.get("risk_label") or risk_label(risk_level(int(row.get("risk_score") or 0))),
+        "plan": float(pipeline.get("plan") or 0),
+        "cash": float(pipeline.get("cash") or 0),
+        "documents": float(pipeline.get("documents") or 0),
+        "paid": float(pipeline.get("paid") or 0),
+        "reasons": row.get("risk_explanation") or risk_explanation(row),
+    }
+
+
+def next_actions_payload(mode: str, has_top_risk: bool = False, has_problems: bool = False) -> list[dict]:
+    actions: list[dict] = []
+    if has_top_risk:
+        actions.append({"label": "Открыть главный риск", "action": {"open": "top_risk"}})
+    if mode == "compare":
+        if has_problems:
+            actions.append({"label": "Показать новые проблемы", "action": {"open_view": "changes"}})
+        actions.append({"label": "Скачать Excel", "action": {"download": "excel"}})
+        actions.append({"label": "Скачать PDF", "action": {"download": "pdf"}})
+        return actions[:5]
+    if has_problems:
+        actions.extend(
+            [
+                {"label": "Показать без кассы", "action": {"post_filter": "no_cash"}},
+                {"label": "Показать без оплат", "action": {"post_filter": "no_payments"}},
+                {"label": "Показать без документов", "action": {"post_filter": "no_documents"}},
+            ]
+        )
+    actions = actions[:3]
+    actions.append({"label": "Скачать Excel", "action": {"download": "excel"}})
+    actions.append({"label": "Скачать PDF", "action": {"download": "pdf"}})
+    return actions[:5]
+
+
+def object_diagnosis(row: dict) -> dict:
+    reasons = row.get("problem_reasons") or problem_reasons(row)
+    labels = {
+        "no_cash": "Есть план, но кассового исполнения нет.",
+        "no_documents": "Есть план, но документы не найдены.",
+        "no_payments": "Есть документы, но оплат не найдено.",
+        "low_cash": "Касса ниже 25% от плана.",
+        "data_gap": "Данные есть не во всех источниках.",
+    }
+    bullets = [labels[reason] for reason in ("no_cash", "no_documents", "no_payments", "low_cash", "data_gap") if reason in reasons]
+    if not bullets:
+        bullets.append("Явных проблем по цепочке денег не видно.")
+    bullets.append("Проверьте исходные строки и документы перед управленческим решением.")
+    severity = "danger" if any(reason in reasons for reason in ("no_cash", "no_documents", "no_payments")) else "warning" if reasons else "normal"
+    return {"title": "Что проверить", "bullets": bullets, "severity": severity}
+
+
 def row_status_from_reasons(reasons: list[str]) -> str:
     if any(reason in reasons for reason in ("no_documents", "no_payments", "no_cash")):
         return "danger"
@@ -995,6 +1117,7 @@ def attention_summary(result: dict, template: str, date: str) -> dict:
             "severity": "empty",
             "bullets": ["По выбранным условиям нет объектов для проверки."],
             "top_risks": [],
+            "next_actions": next_actions_payload("slice", False, False),
         }
     counts = {reason: 0 for reason in ("no_cash", "no_payments", "no_documents", "low_cash", "data_gap")}
     for row in rows:
@@ -1033,23 +1156,13 @@ def attention_summary(result: dict, template: str, date: str) -> dict:
     )[:5]
     top_risks = []
     for row in top_rows:
-        pipeline = row.get("pipeline") or row_pipeline(row)
-        top_risks.append(
-            {
-                "object_key": row.get("object_key", ""),
-                "object_name": row.get("object_name") or row.get("object_code") or "Объект без названия",
-                "risk_score": int(row.get("risk_score") or 0),
-                "risk_label": row.get("risk_label") or risk_label(risk_level(int(row.get("risk_score") or 0))),
-                "plan": float(pipeline.get("plan") or 0),
-                "cash": float(pipeline.get("cash") or 0),
-                "reasons": row.get("risk_explanation") or risk_explanation(row),
-            }
-        )
+        top_risks.append(top_risk_payload(row))
     return {
         "title": "Что требует внимания",
         "severity": severity,
         "bullets": bullets[:5],
         "top_risks": top_risks,
+        "next_actions": next_actions_payload("slice", bool(top_risks), has_problems),
     }
 
 
@@ -1132,6 +1245,7 @@ def assistant_rule_based(message: str, context: dict | None = None) -> dict:
         "start": start,
         "end": end,
         "metrics": context.get("selected_metrics") or ["limit", "obligation", "cash"],
+        "open_view": "overview",
     }
     intent = "run_query"
     confidence = 0.62
@@ -1162,9 +1276,11 @@ def assistant_rule_based(message: str, context: dict | None = None) -> dict:
         action["metrics"] = ["limit", "obligation"]
     if any(word in lower for word in ("проблем", "нет касс", "низк")):
         intent = "show_execution_problems"
-        action["template"] = "all"
+        if action["template"] == "all" and context.get("template") in TEMPLATES:
+            action["template"] = context.get("template") or "all"
         action["metrics"] = ["limit", "cash", "payment", "buau"]
         action["post_filter"] = "execution_problems"
+        action["open_view"] = "problems"
     if "нет касс" in lower:
         action["post_filter"] = "no_cash"
     if "нет оплат" in lower or "нет платеж" in lower:
@@ -1193,51 +1309,177 @@ def assistant_rule_based(message: str, context: dict | None = None) -> dict:
         explanation = " " + " ".join(rag_context.split())[:700]
 
     alternative_label = "Искать во всех данных" if search_text else "Показать все данные"
+    followups = [
+        {"label": "Открыть главный риск", "action": {"open": "top_risk"}},
+        {"label": "Скачать Excel", "action": {"download": "excel"}},
+    ]
+    alternatives = [
+        {
+            "label": alternative_label,
+            "action": {
+                "mode": "slice",
+                "template": "all",
+                "q": search_text,
+                "code": "",
+                "budget": "",
+                "source": "",
+                "post_filter": "",
+                "date": action.get("date", end),
+                "reset_scope": True,
+                "metrics": action["metrics"],
+            },
+        },
+    ]
     return {
         "mode": "rule_based",
         "intent": intent,
         "confidence": confidence,
         "message": f"Я понял запрос как {'сравнение' if intent == 'run_compare' else 'выборку'}: {TEMPLATES.get(action['template'], TEMPLATES['all'])['label']}.{explanation}",
         "action": action,
-        "alternatives": [
-            {
-                "label": alternative_label,
-                "action": {
-                    "mode": "slice",
-                    "template": "all",
-                    "q": search_text,
-                    "code": "",
-                    "budget": "",
-                    "source": "",
-                    "post_filter": "",
-                    "date": action.get("date", end),
-                    "reset_scope": True,
-                    "metrics": action["metrics"],
-                },
-            },
-        ],
+        "followups": followups,
+        "alternatives": alternatives,
         "rag_context": rag_context,
     }
 
 
 def validate_assistant_action(action: dict, fallback: dict) -> dict:
     """Ограничивает действие LLM публичным набором фильтров, шаблонов и метрик."""
-    result = dict(fallback)
+    dates = STORE.meta.get("reporting_dates", []) if "STORE" in globals() else []
+    first_date = dates[0] if dates else ""
+    last_date = dates[-1] if dates else ""
+    result = {key: value for key, value in dict(fallback).items() if key in ASSISTANT_ACTION_FIELDS}
     if not isinstance(action, dict):
+        if not result.get("date"):
+            result["date"] = last_date
         return result
     if action.get("mode") in {"slice", "compare"}:
         result["mode"] = action["mode"]
     if action.get("template") in TEMPLATES:
         result["template"] = action["template"]
-    for key in ("q", "code", "budget", "source", "start", "end", "base", "target", "date", "post_filter"):
+    for key in ("q", "code", "budget", "source"):
         if key in action:
             result[key] = str(action.get(key) or "")[:200]
+    if action.get("post_filter") in ASSISTANT_POST_FILTERS:
+        result["post_filter"] = action.get("post_filter") or ""
+    if action.get("open_view") in ASSISTANT_OPEN_VIEWS:
+        result["open_view"] = action["open_view"]
+    if isinstance(action.get("reset_scope"), bool):
+        result["reset_scope"] = action["reset_scope"]
+    for key in ("date", "base", "target"):
+        if action.get(key) in dates:
+            result[key] = action[key]
     metrics = action.get("metrics")
     if isinstance(metrics, list):
         filtered = [metric for metric in metrics if metric in METRIC_KEYS]
         if filtered:
             result["metrics"] = filtered
+    if result.get("mode") == "compare":
+        result["base"] = result.get("base") if result.get("base") in dates else first_date
+        result["target"] = result.get("target") if result.get("target") in dates else last_date
+        result.setdefault("open_view", "changes")
+    else:
+        result["date"] = result.get("date") if result.get("date") in dates else last_date
+        result.pop("base", None)
+        result.pop("target", None)
+        result.setdefault("open_view", "problems" if result.get("post_filter") else "overview")
     return result
+
+
+def validate_assistant_followups(followups: object) -> list[dict]:
+    result = []
+    if not isinstance(followups, list):
+        return result
+    for item in followups[:5]:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or "")[:80].strip()
+        action = item.get("action") if isinstance(item.get("action"), dict) else {}
+        clean_action = {}
+        for key in ASSISTANT_FOLLOWUP_ACTION_FIELDS:
+            if key in action:
+                clean_action[key] = str(action.get(key) or "")[:80]
+        if label and clean_action:
+            result.append({"label": label, "action": clean_action})
+    return result
+
+
+def assistant_json_schema() -> dict:
+    action_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "mode": {"type": "string", "enum": ["slice", "compare"]},
+            "template": {"type": "string", "enum": list(TEMPLATES)},
+            "date": {"type": "string"},
+            "base": {"type": "string"},
+            "target": {"type": "string"},
+            "q": {"type": "string"},
+            "code": {"type": "string"},
+            "budget": {"type": "string"},
+            "source": {"type": "string"},
+            "post_filter": {"type": "string", "enum": sorted(ASSISTANT_POST_FILTERS)},
+            "metrics": {"type": "array", "items": {"type": "string", "enum": METRIC_KEYS}},
+            "open_view": {"type": "string", "enum": sorted(ASSISTANT_OPEN_VIEWS)},
+            "reset_scope": {"type": "boolean"},
+        },
+        "required": sorted(ASSISTANT_ACTION_FIELDS),
+    }
+    followup_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "label": {"type": "string"},
+            "action": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "open": {"type": "string"},
+                    "download": {"type": "string"},
+                    "post_filter": {"type": "string"},
+                    "open_view": {"type": "string"},
+                },
+                "required": sorted(ASSISTANT_FOLLOWUP_ACTION_FIELDS),
+            },
+        },
+        "required": ["label", "action"],
+    }
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "intent": {"type": "string", "enum": sorted(ASSISTANT_INTENTS)},
+            "confidence": {"type": "number"},
+            "message": {"type": "string"},
+            "action": action_schema,
+            "followups": {"type": "array", "items": followup_schema},
+        },
+        "required": ["intent", "confidence", "message", "action", "followups"],
+    }
+
+
+def groq_chat_completion(model: str, api_key: str, messages: list[dict], response_format: dict) -> dict:
+    body = json.dumps(
+        {
+            "model": model,
+            "messages": messages,
+            "temperature": 0.1,
+            "response_format": response_format,
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    request = Request(
+        "https://api.groq.com/openai/v1/chat/completions",
+        data=body,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=20) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as error:
+        error.close()
+        raise
+    return json.loads(payload["choices"][0]["message"]["content"])
 
 
 def assistant_llm(message: str, context: dict, rag_context: str) -> dict:
@@ -1249,13 +1491,15 @@ def assistant_llm(message: str, context: dict, rag_context: str) -> dict:
     start, end = default_date_range()
     system_prompt = (
         "Ты помощник конструктора бюджетных выборок. Ты не считаешь суммы сам. "
-        "Верни только JSON без markdown. Допустимые intent: "
+        "Если пользователь просит деньги или итоги, выбери action; backend посчитает. "
+        "Верни только JSON без markdown. Выбирай только разрешенные шаблоны, метрики и фильтры. "
+        "Не придумывай даты: используй только available_dates.all. Не проси raw records. Допустимые intent: "
         + ", ".join(sorted(ASSISTANT_INTENTS))
         + ". Допустимые шаблоны: "
         + ", ".join(TEMPLATES)
         + ". Допустимые метрики: "
         + ", ".join(METRIC_KEYS)
-        + ". JSON: {\"intent\":\"run_query\",\"confidence\":0.8,\"message\":\"...\",\"action\":{...},\"alternatives\":[]}."
+        + ". JSON должен соответствовать schema assistant_action."
     )
     user_payload = {
         "message": message,
@@ -1263,40 +1507,38 @@ def assistant_llm(message: str, context: dict, rag_context: str) -> dict:
         "available_dates": {"start": start, "end": end, "all": STORE.meta.get("reporting_dates", [])},
         "templates": {code: item["description"] for code, item in TEMPLATES.items()},
         "metrics": METRICS,
+        "post_filters": {code: code for code in sorted(ASSISTANT_POST_FILTERS)},
+        "quick_actions": quick_actions_payload(),
         "rag_context": rag_context,
     }
-    body = json.dumps(
-        {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
-            ],
-            "temperature": 0.1,
-            "response_format": {"type": "json_object"},
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+    ]
+    schema_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "assistant_action",
+            "strict": True,
+            "schema": assistant_json_schema(),
         },
-        ensure_ascii=False,
-    ).encode("utf-8")
-    request = Request(
-        "https://api.groq.com/openai/v1/chat/completions",
-        data=body,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        method="POST",
-    )
-    with urlopen(request, timeout=15) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-    content = payload["choices"][0]["message"]["content"]
-    parsed = json.loads(content)
+    }
+    try:
+        parsed = groq_chat_completion(model, api_key, messages, schema_format)
+    except Exception:
+        parsed = groq_chat_completion(model, api_key, messages, {"type": "json_object"})
     fallback = assistant_rule_based(message, context)
     intent = parsed.get("intent") if parsed.get("intent") in ASSISTANT_INTENTS else fallback["intent"]
     action = validate_assistant_action(parsed.get("action", {}), fallback["action"])
+    followups = validate_assistant_followups(parsed.get("followups")) or fallback.get("followups", [])
     return {
         "mode": "llm",
         "intent": intent,
         "confidence": float(parsed.get("confidence") or fallback["confidence"]),
         "message": str(parsed.get("message") or fallback["message"])[:1000],
         "action": action,
-        "alternatives": parsed.get("alternatives") if isinstance(parsed.get("alternatives"), list) else fallback["alternatives"],
+        "followups": followups,
+        "alternatives": fallback.get("alternatives", []),
         "rag_context": rag_context,
     }
 
@@ -1311,6 +1553,107 @@ def assistant_response(message: str, context: dict | None = None) -> dict:
         return fallback
     try:
         return assistant_llm(message, context, fallback.get("rag_context", ""))
+    except Exception:
+        return fallback
+
+
+def explain_rule_based(kind: str, payload: dict) -> dict:
+    summary = payload.get("attention_summary") if isinstance(payload.get("attention_summary"), dict) else {}
+    compare = payload.get("compare_insights") if isinstance(payload.get("compare_insights"), dict) else {}
+    readiness = payload.get("readiness") if isinstance(payload.get("readiness"), dict) else {}
+    top_risks = payload.get("top_risks") if isinstance(payload.get("top_risks"), list) else []
+    source = compare if kind == "compare" and compare else summary
+    bullets = [str(item) for item in source.get("bullets", [])[:5] if item]
+    if not bullets and readiness:
+        checks = readiness.get("checks") if isinstance(readiness.get("checks"), list) else []
+        bullets = [str(item.get("message") or item.get("label")) for item in checks[:4] if isinstance(item, dict)]
+    if not bullets and top_risks:
+        bullets = [f"Сначала проверьте {item.get('object_name') or 'объект'}: {item.get('risk_label') or 'высокий риск'}." for item in top_risks[:3]]
+    if not bullets:
+        bullets = ["Главное внимание стоит уделить объектам без кассы, оплат или документов."]
+    return {
+        "mode": "rule_based",
+        "title": "Короткое объяснение",
+        "bullets": bullets[:5],
+        "next_actions": [
+            {"label": "Открыть главный риск", "action": {"open": "top_risk"}},
+            {"label": "Скачать Excel", "action": {"download": "excel"}},
+        ],
+    }
+
+
+def explain_llm(kind: str, payload: dict) -> dict:
+    api_key = os.environ.get("GROQ_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("GROQ_API_KEY is not set")
+    model = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b").strip() or "openai/gpt-oss-120b"
+    allowed_payload = {
+        "kind": kind,
+        "attention_summary": payload.get("attention_summary") if isinstance(payload.get("attention_summary"), dict) else {},
+        "compare_insights": payload.get("compare_insights") if isinstance(payload.get("compare_insights"), dict) else {},
+        "readiness": payload.get("readiness") if isinstance(payload.get("readiness"), dict) else {},
+        "top_risks": (payload.get("top_risks") if isinstance(payload.get("top_risks"), list) else [])[:5],
+        "filters": payload.get("filters") if isinstance(payload.get("filters"), dict) else {},
+    }
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "title": {"type": "string"},
+            "bullets": {"type": "array", "items": {"type": "string"}},
+            "next_actions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "label": {"type": "string"},
+                        "action": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {"open": {"type": "string"}, "download": {"type": "string"}},
+                            "required": ["open", "download"],
+                        },
+                    },
+                    "required": ["label", "action"],
+                },
+            },
+        },
+        "required": ["title", "bullets", "next_actions"],
+    }
+    messages = [
+        {
+            "role": "system",
+            "content": "Объясни результат простыми словами. Не считай суммы, не проси raw records, верни только JSON по schema.",
+        },
+        {"role": "user", "content": json.dumps(allowed_payload, ensure_ascii=False)},
+    ]
+    parsed = groq_chat_completion(
+        model,
+        api_key,
+        messages,
+        {"type": "json_schema", "json_schema": {"name": "explain_result", "strict": True, "schema": schema}},
+    )
+    fallback = explain_rule_based(kind, payload)
+    bullets = [str(item)[:240] for item in parsed.get("bullets", []) if item][:5]
+    return {
+        "mode": "llm",
+        "title": str(parsed.get("title") or fallback["title"])[:120],
+        "bullets": bullets or fallback["bullets"],
+        "next_actions": validate_assistant_followups(parsed.get("next_actions")) or fallback["next_actions"],
+    }
+
+
+def explain_response(kind: str, payload: dict | None = None) -> dict:
+    payload = payload if isinstance(payload, dict) else {}
+    kind = kind if kind in {"query", "compare", "object"} else "query"
+    fallback = explain_rule_based(kind, payload)
+    if os.environ.get("ASSISTANT_ENABLED", "auto").lower() == "false":
+        return fallback
+    if not os.environ.get("GROQ_API_KEY", "").strip():
+        return fallback
+    try:
+        return explain_llm(kind, payload)
     except Exception:
         return fallback
 
@@ -1505,6 +1848,7 @@ def object_detail(params: dict[str, list[str]]) -> dict:
         "risk_level": row.get("risk_level", "low"),
         "risk_label": row.get("risk_label", risk_label("low")),
         "risk_explanation": row.get("risk_explanation", []),
+        "diagnosis": object_diagnosis(row),
         "pipeline": row.get("pipeline", {}),
         "sources": [source.strip() for source in str(row.get("sources", "")).split(",") if source.strip()],
         "documents": documents[:100],
@@ -1516,7 +1860,7 @@ def export_excel(params: dict[str, list[str]]) -> tuple[bytes, str]:
     """Формирует рабочий Excel: выводы, итоги, объекты, проблемы и методику."""
     try:
         from openpyxl import Workbook
-        from openpyxl.styles import Font
+        from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     except ImportError as exc:
         raise RuntimeError("excel_dependency_missing") from exc
 
@@ -1542,39 +1886,44 @@ def export_excel(params: dict[str, list[str]]) -> tuple[bytes, str]:
     ws.title = "Выводы"
     pipeline = row_pipeline(totals)
     problem_count = sum(1 for row in rows if row.get("problem_reasons"))
-    ws.append(["Отчет", TEMPLATES.get(template, TEMPLATES["all"])["label"]])
-    ws.append(["Дата отчета", date_label])
-    ws.append(["Готовый отчет", TEMPLATES.get(template, TEMPLATES["all"])["label"]])
-    ws.append(["Общий статус", summary.get("severity", "")])
+    report_created = datetime.now().strftime("%Y-%m-%d %H:%M")
+    ws.append(["Аналитика расходов"])
+    ws.append([f"Период: {date_label}", f"Шаблон: {TEMPLATES.get(template, TEMPLATES['all'])['label']}", f"Сформировано: {report_created}"])
     ws.append([])
     ws.append(["Что требует внимания"])
     for bullet in summary.get("bullets") or []:
         ws.append([bullet])
     top_risks = summary.get("top_risks") or summary.get("new_problem_objects") or summary.get("worsened_objects") or []
     ws.append([])
-    ws.append(["Топ-5 рисков"])
-    ws.append(["Объект", "Риск", "План", "Касса", "Причины"])
+    ws.append(["Главные риски"])
+    ws.append(["Объект", "Код", "Бюджет", "Риск", "План", "Касса", "Причины"])
     for item in top_risks[:5]:
         ws.append([
-            item.get("object_name", ""),
+            item.get("short_name") or item.get("object_name", ""),
+            item.get("object_code", ""),
+            item.get("budget", ""),
             f"{item.get('risk_label', '')} {item.get('risk_score', '')}".strip(),
             item.get("plan", 0),
             item.get("cash", 0),
             ", ".join(item.get("reasons") or []),
         ])
+    ws.append([])
+    ws.append(["Следующие действия"])
+    for item in ("Открыть карточку объекта в системе", "Проверить исходные строки", "Уточнить документы/оплаты"):
+        ws.append([item])
 
     ws = wb.create_sheet("Итоги")
     summary_rows = [
-        ("Дата отчета", date_label),
-        ("Готовый отчет", TEMPLATES.get(template, TEMPLATES["all"])["label"]),
-        ("Найдено объектов", len(rows)),
-        ("План", pipeline["plan"]),
-        ("Документы", pipeline["documents"]),
-        ("Оплачено", pipeline["paid"]),
-        ("Касса", pipeline["cash"]),
-        ("Проблемных объектов", problem_count),
+        ("Лимиты", totals.get("limit", 0), "Доведенные бюджетные лимиты."),
+        ("БО", totals.get("obligation", 0), "Принятые бюджетные обязательства."),
+        ("Касса", totals.get("cash", 0), "Кассовое исполнение по РЧБ."),
+        ("Соглашения", totals.get("agreement", 0), "Суммы соглашений."),
+        ("Контракты", totals.get("contract", 0), "Суммы контрактов и договоров."),
+        ("Платежи", totals.get("payment", 0), "Фактические платежи."),
+        ("БУ/АУ", totals.get("buau", 0), "Выплаты учреждений."),
+        ("Проблемных объектов", problem_count, "Строки с явными причинами риска."),
     ]
-    ws.append(["Показатель", "Значение"])
+    ws.append(["Показатель", "Значение", "Пояснение"])
     for item in summary_rows:
         ws.append(list(item))
 
@@ -1598,7 +1947,14 @@ def export_excel(params: dict[str, list[str]]) -> tuple[bytes, str]:
         ])
 
     problems_ws = wb.create_sheet("Проблемы")
-    problems_ws.append(["Причина", "Риск", "Балл риска", "Объект", "Код", "План", "Документы", "Оплачено", "Касса", "Источники"])
+    problems_ws.append(["Причина", "Причина текстом", "Риск", "Балл риска", "Объект", "Код", "План", "Документы", "Оплачено", "Касса", "Источники"])
+    reason_labels = {
+        "no_documents": "Есть план, но документы не найдены",
+        "no_payments": "Есть документы, но оплат не найдено",
+        "no_cash": "Есть план, но кассового исполнения нет",
+        "low_cash": "Касса ниже 25% от плана",
+        "data_gap": "Данные есть не во всех источниках",
+    }
     problem_rows = sorted(
         [row for row in rows if row.get("problem_reasons")],
         key=lambda item: (int(item.get("risk_score") or 0), float((item.get("pipeline") or row_pipeline(item)).get("plan") or 0)),
@@ -1609,6 +1965,7 @@ def export_excel(params: dict[str, list[str]]) -> tuple[bytes, str]:
         for reason in row.get("problem_reasons") or []:
             problems_ws.append([
                 reason,
+                reason_labels.get(reason, "Проблема данных"),
                 row.get("risk_label", ""),
                 row.get("risk_score", 0),
                 row.get("object_name", ""),
@@ -1644,12 +2001,63 @@ def export_excel(params: dict[str, list[str]]) -> tuple[bytes, str]:
         "Документы = соглашения + контракты.",
         "Оплачено = платежи + БУАУ.",
         "Касса = кассовые выплаты из РЧБ.",
+        "Риск является управленческим индикатором для проверки и не является юридическим выводом.",
     ):
         method_ws.append([line])
 
+    header_fill = PatternFill("solid", fgColor="1F4E78")
+    header_font = Font(bold=True, color="FFFFFF")
+    title_font = Font(bold=True, size=16, color="1F4E78")
+    section_fill = PatternFill("solid", fgColor="D9EAF7")
+    risk_fills = {
+        "critical": PatternFill("solid", fgColor="F4CCCC"),
+        "high": PatternFill("solid", fgColor="FCE4D6"),
+        "medium": PatternFill("solid", fgColor="FFF2CC"),
+    }
+    thin_border = Border(
+        left=Side(style="thin", color="D9E0E4"),
+        right=Side(style="thin", color="D9E0E4"),
+        top=Side(style="thin", color="D9E0E4"),
+        bottom=Side(style="thin", color="D9E0E4"),
+    )
+    money_headers = {"Значение", "План", "Документы", "Оплачено", "Касса", "Сумма"}
+    table_sheets = {"Итоги", "Объекты", "Проблемы", "Исходные строки"}
+
+    ws = wb["Выводы"]
+    ws.freeze_panes = "A4"
+    ws["A1"].font = title_font
+    for row_number in (4, 4 + len(summary.get("bullets") or []) + 2, ws.max_row - 3):
+        for cell in ws[row_number]:
+            cell.fill = section_fill
+            cell.font = Font(bold=True, color="1F4E78")
+
     for sheet in wb.worksheets:
-        for cell in sheet[1]:
-            cell.font = Font(bold=True)
+        if sheet.title in table_sheets:
+            sheet.freeze_panes = "A2"
+            sheet.auto_filter.ref = sheet.dimensions
+        if sheet.title != "Выводы":
+            for cell in sheet[1]:
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
+        header_values = [cell.value for cell in sheet[1]]
+        money_columns = {index + 1 for index, value in enumerate(header_values) if value in money_headers}
+        for row in sheet.iter_rows():
+            row_risk_level = ""
+            if sheet.title == "Объекты":
+                score = int(row[9].value or 0) if len(row) > 9 and isinstance(row[9].value, (int, float)) else 0
+                row_risk_level = risk_level(score)
+            elif sheet.title == "Проблемы":
+                score = int(row[3].value or 0) if len(row) > 3 and isinstance(row[3].value, (int, float)) else 0
+                row_risk_level = risk_level(score)
+            fill = next((risk_fills[level] for level in risk_fills if level in row_risk_level), None)
+            for cell in row:
+                cell.border = thin_border
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
+                if cell.column in money_columns and isinstance(cell.value, (int, float)):
+                    cell.number_format = "#,##0"
+                if fill and cell.row > 1:
+                    cell.fill = fill
         for column in sheet.columns:
             width = min(55, max(12, *(len(str(cell.value or "")) + 2 for cell in column)))
             sheet.column_dimensions[column[0].column_letter].width = width
@@ -1660,6 +2068,241 @@ def export_excel(params: dict[str, list[str]]) -> tuple[bytes, str]:
         filename = f"analytics_compare_{template}_{params.get('base', [''])[0]}_{params.get('target', [''])[0]}.xlsx"
     else:
         filename = f"analytics_{template}_{params.get('date', ['as_of'])[0] or 'as_of'}.xlsx"
+    return buffer.getvalue(), filename
+
+
+def format_money_pdf(value: object) -> str:
+    return f"{float(value or 0):,.0f}".replace(",", " ")
+
+
+def register_pdf_font() -> tuple[str, str]:
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    # Кириллица надежнее отображается с системным TTF; Helvetica остается fallback.
+    fonts = [
+        ("ArialPdf", "ArialPdfBold", "C:/Windows/Fonts/arial.ttf", "C:/Windows/Fonts/arialbd.ttf"),
+        ("CalibriPdf", "CalibriPdfBold", "C:/Windows/Fonts/calibri.ttf", "C:/Windows/Fonts/calibrib.ttf"),
+        ("TahomaPdf", "TahomaPdfBold", "C:/Windows/Fonts/tahoma.ttf", "C:/Windows/Fonts/tahomabd.ttf"),
+    ]
+    for regular_name, bold_name, regular_path, bold_path in fonts:
+        if not Path(regular_path).exists():
+            continue
+        try:
+            pdfmetrics.registerFont(TTFont(regular_name, regular_path))
+            if Path(bold_path).exists():
+                pdfmetrics.registerFont(TTFont(bold_name, bold_path))
+                return regular_name, bold_name
+            return regular_name, regular_name
+        except Exception:
+            continue
+    return "Helvetica", "Helvetica-Bold"
+
+
+def export_pdf(params: dict[str, list[str]]) -> tuple[bytes, str]:
+    """Формирует короткий презентационный PDF-отчет рядом с рабочим Excel."""
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.enums import TA_CENTER, TA_LEFT
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.lib.units import mm
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+    except ImportError as exc:
+        raise RuntimeError("pdf_dependency_missing") from exc
+
+    from html import escape
+
+    mode = params.get("mode", ["slice"])[0].strip()
+    template = params.get("template", ["all"])[0].strip() or "all"
+    template_label = TEMPLATES.get(template, TEMPLATES["all"])["label"]
+    if mode == "compare":
+        result = compare_periods(params)
+        rows = result["rows"]
+        summary = result["compare_insights"]
+        date_label = f"{result['base']} - {result['target']}"
+        metrics = selected_metrics(params)
+        totals = {metric: sum(float(row.get("metrics", {}).get(metric, {}).get("target") or 0) for row in rows) for metric in metrics}
+        change_items = (
+            list(summary.get("new_problem_objects") or [])
+            + list(summary.get("worsened_objects") or [])
+            + list(summary.get("stalled_cash_objects") or [])
+        )
+        filename = f"analytics_compare_{template}_{result['base']}_{result['target']}.pdf"
+    else:
+        result = query_as_of(params)
+        rows = result["rows"]
+        summary = result["attention_summary"]
+        date_label = result["date"]
+        totals = result["totals"]
+        change_items = []
+        filename = f"analytics_{template}_{params.get('date', ['as_of'])[0] or 'as_of'}.pdf"
+
+    regular_font, bold_font = register_pdf_font()
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle("PdfTitle", parent=styles["Title"], fontName=bold_font, fontSize=22, leading=26, textColor=colors.HexColor("#1F4E78"), alignment=TA_CENTER, spaceAfter=10))
+    styles.add(ParagraphStyle("PdfMeta", parent=styles["BodyText"], fontName=regular_font, fontSize=10, leading=14, alignment=TA_CENTER, textColor=colors.HexColor("#334155")))
+    styles.add(ParagraphStyle("PdfSection", parent=styles["Heading2"], fontName=bold_font, fontSize=13, leading=16, textColor=colors.HexColor("#1F4E78"), backColor=colors.HexColor("#D9EAF7"), borderPadding=6, spaceBefore=10, spaceAfter=8))
+    styles.add(ParagraphStyle("PdfBody", parent=styles["BodyText"], fontName=regular_font, fontSize=9, leading=12, textColor=colors.HexColor("#1f2937")))
+    styles.add(ParagraphStyle("PdfSmall", parent=styles["BodyText"], fontName=regular_font, fontSize=8, leading=10, textColor=colors.HexColor("#475569")))
+    styles.add(ParagraphStyle("PdfCell", parent=styles["BodyText"], fontName=regular_font, fontSize=7, leading=9, alignment=TA_LEFT))
+    styles.add(ParagraphStyle("PdfHeaderCell", parent=styles["BodyText"], fontName=bold_font, fontSize=7, leading=9, textColor=colors.white, alignment=TA_LEFT))
+
+    def p(text: object, style: str = "PdfBody") -> Paragraph:
+        return Paragraph(escape(str(text or "")), styles[style])
+
+    def short_cell(row: dict) -> str:
+        name = str(row.get("short_name") or row.get("object_name") or row.get("object_code") or "Объект без названия")
+        return name if len(name) <= 120 else f"{name[:117]}..."
+
+    def table(data: list[list[object]], widths: list[float] | None = None, risk_column: int | None = None) -> Table:
+        converted = [[p(cell, "PdfHeaderCell" if row_index == 0 else "PdfCell") for cell in row] for row_index, row in enumerate(data)]
+        result_table = Table(converted, colWidths=widths, repeatRows=1, hAlign="LEFT")
+        style = TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F4E78")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), bold_font),
+                ("FONTNAME", (0, 1), (-1, -1), regular_font),
+                ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#D9E0E4")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ]
+        )
+        if risk_column is not None:
+            fills = {"Критичный": "#F4CCCC", "Высокий": "#FCE4D6", "Средний": "#FFF2CC"}
+            for row_index, raw_row in enumerate(data[1:], start=1):
+                risk_text = str(raw_row[risk_column] if len(raw_row) > risk_column else "")
+                for label, fill in fills.items():
+                    if label in risk_text:
+                        style.add("BACKGROUND", (0, row_index), (-1, row_index), colors.HexColor(fill))
+                        break
+        result_table.setStyle(style)
+        return result_table
+
+    pipeline = row_pipeline(totals)
+    problem_count = sum(1 for row in rows if row.get("problem_reasons") or int(row.get("risk_score") or row.get("risk", {}).get("target") or 0) >= 25)
+    story = [
+        p("Аналитика расходов", "PdfTitle"),
+        p(f"Шаблон: {template_label}", "PdfMeta"),
+        p(f"Период/дата: {date_label}", "PdfMeta"),
+        p(f"Сформировано: {datetime.now().strftime('%Y-%m-%d %H:%M')}", "PdfMeta"),
+        Spacer(1, 5 * mm),
+        p("Что требует внимания", "PdfSection"),
+    ]
+    for bullet in (summary.get("bullets") or [])[:5]:
+        story.append(p(f"• {bullet}"))
+    story.extend(
+        [
+            p("Ключевые итоги", "PdfSection"),
+            table(
+                [
+                    ["Показатель", "Значение"],
+                    ["План", format_money_pdf(pipeline.get("plan"))],
+                    ["Документы", format_money_pdf(pipeline.get("documents"))],
+                    ["Оплачено", format_money_pdf(pipeline.get("paid"))],
+                    ["Касса", format_money_pdf(pipeline.get("cash"))],
+                    ["Проблемных объектов", problem_count],
+                ],
+                [55 * mm, 45 * mm],
+            ),
+        ]
+    )
+
+    risk_rows = [["Объект", "Код", "Бюджет", "Риск", "План", "Касса", "Причины"]]
+    if mode == "compare":
+        story.append(p("Главные изменения", "PdfSection"))
+        for item in change_items[:7]:
+            risk_rows.append(
+                [
+                    short_cell(item),
+                    item.get("object_code", ""),
+                    item.get("budget", ""),
+                    f"{item.get('risk_label', '')} {item.get('risk_score', '')}".strip(),
+                    format_money_pdf(item.get("plan")),
+                    format_money_pdf(item.get("cash")),
+                    ", ".join(item.get("reasons") or []),
+                ]
+            )
+    else:
+        story.append(p("Главные риски", "PdfSection"))
+        for item in (summary.get("top_risks") or [])[:7]:
+            risk_rows.append(
+                [
+                    short_cell(item),
+                    item.get("object_code", ""),
+                    item.get("budget", ""),
+                    f"{item.get('risk_label', '')} {item.get('risk_score', '')}".strip(),
+                    format_money_pdf(item.get("plan")),
+                    format_money_pdf(item.get("cash")),
+                    ", ".join(item.get("reasons") or []),
+                ]
+            )
+    if len(risk_rows) == 1:
+        risk_rows.append(["Нет данных", "", "", "", "", "", ""])
+    story.append(table(risk_rows, [62 * mm, 24 * mm, 42 * mm, 27 * mm, 28 * mm, 28 * mm, 58 * mm], risk_column=3))
+
+    actions = [item.get("label", "") for item in (summary.get("next_actions") or []) if item.get("label")]
+    if not actions:
+        actions = ["Открыть главный риск", "Проверить исходные строки", "Скачать Excel для детальной работы"]
+    story.append(p("Что делать дальше", "PdfSection"))
+    for action in actions[:5]:
+        story.append(p(f"• {action}"))
+
+    story.append(p("Методика", "PdfSection"))
+    for line in (
+        "План = лимиты + БО",
+        "Документы = соглашения + контракты",
+        "Оплачено = платежи + БУ/АУ",
+        "Касса = кассовое исполнение из РЧБ",
+        "Риск - управленческий индикатор для приоритизации проверки, не юридический вывод",
+        "Сравнение использует те же правила состояния на дату." if mode == "compare" else "",
+    ):
+        if line:
+            story.append(p(f"• {line}"))
+
+    story.extend([PageBreak(), p("Приложение: Топ объектов", "PdfSection")])
+    object_rows = [["Объект", "Код", "План", "Документы", "Оплачено", "Касса", "Риск"]]
+    for row in rows[:20]:
+        if mode == "compare":
+            metrics = row.get("metrics", {})
+            row_pipeline_data = {
+                "plan": float(metrics.get("limit", {}).get("target") or 0) + float(metrics.get("obligation", {}).get("target") or 0),
+                "documents": float(metrics.get("agreement", {}).get("target") or 0) + float(metrics.get("contract", {}).get("target") or 0),
+                "paid": float(metrics.get("payment", {}).get("target") or 0) + float(metrics.get("buau", {}).get("target") or 0),
+                "cash": float(metrics.get("cash", {}).get("target") or 0),
+            }
+            risk_text = str(row.get("risk", {}).get("target") or 0)
+        else:
+            row_pipeline_data = row.get("pipeline") or row_pipeline(row)
+            risk_text = f"{row.get('risk_label', '')} {row.get('risk_score', '')}".strip()
+        object_rows.append(
+            [
+                short_cell(row),
+                row.get("object_code", ""),
+                format_money_pdf(row_pipeline_data.get("plan")),
+                format_money_pdf(row_pipeline_data.get("documents")),
+                format_money_pdf(row_pipeline_data.get("paid")),
+                format_money_pdf(row_pipeline_data.get("cash")),
+                risk_text,
+            ]
+        )
+    story.append(table(object_rows, [76 * mm, 25 * mm, 28 * mm, 28 * mm, 28 * mm, 28 * mm, 32 * mm], risk_column=6))
+
+    def on_page(canvas, doc):
+        canvas.saveState()
+        canvas.setFont(regular_font, 8)
+        canvas.setFillColor(colors.HexColor("#64748B"))
+        canvas.drawString(doc.leftMargin, 9 * mm, "Аналитика расходов")
+        canvas.drawRightString(landscape(A4)[0] - doc.rightMargin, 9 * mm, f"стр. {doc.page}")
+        canvas.restoreState()
+
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), leftMargin=12 * mm, rightMargin=12 * mm, topMargin=12 * mm, bottomMargin=16 * mm)
+    doc.build(story, onFirstPage=on_page, onLaterPages=on_page)
     return buffer.getvalue(), filename
 
 
@@ -1675,6 +2318,8 @@ def compare_object_summary(row: dict, risk_value: int | None = None, base_row: d
         "risk_label": risk_label(risk_level(score)),
         "plan": float(pipeline.get("plan") or 0),
         "cash": float(pipeline.get("cash") or 0),
+        "documents": float(pipeline.get("documents") or 0),
+        "paid": float(pipeline.get("paid") or 0),
         "reasons": row.get("risk_explanation") or risk_explanation(row),
     }
     if base_row is not None:
@@ -1749,6 +2394,7 @@ def compare_insights(base_rows: list[dict], target_rows: list[dict]) -> dict:
         "worsened_objects": worsened_objects,
         "improved_objects": improved_objects,
         "stalled_cash_objects": stalled_cash_objects,
+        "next_actions": next_actions_payload("compare", bool(new_problem_objects or worsened_objects), bool(new_problem_objects)),
     }
 
 
@@ -1864,6 +2510,16 @@ class Handler(SimpleHTTPRequestHandler):
                 filename,
             )
             return
+        if parsed.path == "/api/export.pdf":
+            try:
+                body, filename = export_pdf(parse_qs(parsed.query))
+            except RuntimeError as exc:
+                if str(exc) == "pdf_dependency_missing":
+                    self.write_json({"error": "pdf_dependency_missing"}, status=500)
+                    return
+                raise
+            self.write_binary(body, "application/pdf", filename)
+            return
         if parsed.path == "/api/quality":
             self.write_json({"issues": QUALITY_ISSUES, "summary": quality_summary(), "load_stats": LOAD_STATS})
             return
@@ -1918,6 +2574,16 @@ class Handler(SimpleHTTPRequestHandler):
             except json.JSONDecodeError:
                 self.write_json({"error": "invalid_json"}, status=400)
             return
+        if parsed.path == "/api/explain":
+            try:
+                length = int(self.headers.get("Content-Length", "0") or "0")
+                payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+                kind = str(payload.get("kind") or "query")
+                data = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+                self.write_json(explain_response(kind, data))
+            except json.JSONDecodeError:
+                self.write_json({"error": "invalid_json"}, status=400)
+            return
         self.write_json({"error": "not_found"}, status=404)
 
     def write_json(self, payload: object, status: int = 200) -> None:
@@ -1940,10 +2606,11 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 def main() -> None:
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    port = int(os.environ.get("PORT") or (sys.argv[1] if len(sys.argv) > 1 else 8000))
+    host = os.environ.get("HOST", "0.0.0.0")
+    server = ThreadingHTTPServer((host, port), Handler)
     print(f"Loaded {STORE.meta['records']} records from {DATA_DIR}")
-    print(f"Open http://127.0.0.1:{port}")
+    print(f"Open http://{host}:{port}")
     server.serve_forever()
 
 

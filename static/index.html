@@ -102,6 +102,7 @@
         <div class="side-actions">
           <button type="button" class="ghost" @click="resetFilters">Очистить</button>
           <button type="button" class="primary" @click="exportExcel">Скачать Excel</button>
+          <button type="button" class="ghost" @click="exportPdf">Скачать PDF</button>
           <button type="button" class="ghost" @click="exportCsv">Скачать таблицу</button>
         </div>
       </aside>
@@ -138,41 +139,33 @@
 
         <section class="smart-search">
           <label>
-            <span>Напишите объект, код или вопрос</span>
+            <span>Напишите, что нужно получить</span>
             <input
-              v-model.trim="smartInput"
+              v-model.trim="command.text"
               type="search"
-              placeholder="Например: СКК Благовещенск"
-              @input="onSmartInput"
-              @keydown.enter.prevent="applyFirstSuggestion"
+              placeholder="Например: СКК Благовещенск без кассы на 01.04.2026"
+              @input="onCommandInput"
+              @keydown.enter.prevent="runCommand"
             />
           </label>
-          <div class="examples">Примеры: СКК Благовещенск · где нет кассы · сравнить СКК · 970 Свободный</div>
-          <div v-if="smartSuggestions.length" class="suggestions">
-            <button v-for="suggestion in smartSuggestions" :key="suggestion.code" type="button" @click="applySmartSuggestion(suggestion)">
+          <button type="button" class="primary command-button" @click="runCommand" :disabled="command.loading">
+            {{ command.loading ? 'Разбираю...' : 'Показать' }}
+          </button>
+          <div class="examples">Примеры: проблемные СКК · сравнить СКК · 970 Свободный · где нет кассы</div>
+          <div v-if="command.response" class="command-status">
+            {{ command.response.mode === 'llm' ? 'Запрос разобран помощником' : 'Запрос разобран по правилам' }}
+          </div>
+          <div v-if="command.error" class="command-status danger">{{ command.error }}</div>
+          <div v-if="command.response && command.response.message" class="command-message">{{ command.response.message }}</div>
+          <div v-if="command.suggestions.length" class="suggestions">
+            <button v-for="suggestion in command.suggestions" :key="suggestion.code" type="button" @click="applyCommandSuggestion(suggestion)">
               <strong>{{ suggestion.title }}</strong>
               <span>{{ suggestion.description }}</span>
             </button>
           </div>
-        </section>
-
-        <section class="assistant-card">
-          <div>
-            <div class="section-kicker">Спросить помощника</div>
-            <h3>Помощник понимает обычные вопросы</h3>
-          </div>
-          <textarea v-model.trim="assistant.message" placeholder="Например: покажи СКК по Благовещенску"></textarea>
-          <div class="assistant-actions">
-            <button type="button" class="primary" @click="askAssistant" :disabled="assistant.loading">
-              {{ assistant.loading ? 'Разбираю запрос...' : 'Понять запрос' }}
-            </button>
-            <span v-if="assistant.response" class="pill muted">{{ assistant.response.mode === 'llm' ? 'Groq' : 'Правила' }}</span>
-          </div>
-          <div v-if="assistant.response" class="assistant-response">
-            <p>{{ assistant.response.message }}</p>
-            <button type="button" class="primary" @click="applyAssistantAction(assistant.response.action)">Показать результат</button>
-            <button v-for="alt in assistant.response.alternatives" :key="alt.label" type="button" class="ghost" @click="applyAssistantAction(alt.action)">
-              {{ alt.label }}
+          <div v-if="command.response && command.response.followups && command.response.followups.length" class="command-followups">
+            <button v-for="item in command.response.followups" :key="item.label" type="button" class="ghost" @click="runFollowup(item.action)">
+              {{ item.label }}
             </button>
           </div>
         </section>
@@ -183,6 +176,15 @@
           <ul>
             <li v-for="item in resultNarrative.bullets" :key="item">{{ item }}</li>
           </ul>
+          <button type="button" class="ghost explain-button" @click="explainResult" :disabled="loading.explain">
+            {{ loading.explain ? 'Объясняю...' : 'Объяснить проще' }}
+          </button>
+          <div v-if="explanation" class="explain-result">
+            <h4>{{ explanation.title }}</h4>
+            <ul>
+              <li v-for="item in explanation.bullets" :key="item">{{ item }}</li>
+            </ul>
+          </div>
           <div v-if="resultNarrative.severity === 'empty'" class="empty-actions">
             <button v-for="item in emptyStateSuggestions" :key="item.label" type="button" class="ghost" @click="applyEmptySuggestion(item)">
               {{ item.label }}
@@ -190,12 +192,30 @@
           </div>
         </section>
 
+        <section v-if="resultNextActions.length" class="next-actions">
+          <div class="section-kicker">Что делать дальше</div>
+          <div class="next-action-list">
+            <button v-for="item in resultNextActions" :key="item.label" type="button" class="ghost" @click="runFollowup(item.action)">
+              {{ item.label }}
+            </button>
+          </div>
+        </section>
+
+        <section v-if="demoMode === 'skk_risks'" class="demo-guide">
+          <strong>Демо-сценарий</strong>
+          <span>1. Посмотрите вывод 2. Откройте главный риск 3. Покажите источник цифр 4. Скачайте Excel</span>
+          <button type="button" class="ghost" @click="runFollowup({ open: 'top_risk' })">Открыть главный риск</button>
+          <button type="button" class="ghost" @click="exportPdf">Скачать PDF</button>
+          <button type="button" class="ghost" @click="exportExcel">Скачать Excel</button>
+        </section>
+
         <section v-if="mode === 'slice' && topRisks.length" class="top-risks">
           <div class="section-kicker">Главные риски</div>
           <div class="top-risk-list">
             <button v-for="row in topRisks" :key="row.object_key" type="button" class="top-risk-item" @click="openObject(row)">
-              <strong>{{ row.object_name }}</strong>
-              <span>{{ row.risk_label }} · {{ formatMoney(row.plan) }}</span>
+              <strong>{{ row.short_name || row.object_name }}</strong>
+              <span>{{ row.object_code }} · {{ row.budget }}</span>
+              <span>{{ row.risk_label }} · {{ formatMoney(row.plan) }} план · {{ formatMoney(row.cash) }} касса</span>
             </button>
           </div>
         </section>
@@ -225,6 +245,39 @@
               <button type="button" class="ghost" @click="readinessOpen = !readinessOpen">Проверить перед показом</button>
             </div>
             <canvas ref="chart" height="280"></canvas>
+          </article>
+
+          <article class="panel chart-panel">
+            <div class="panel-head">
+              <div>
+                <h3>Воронка денег</h3>
+                <p>План · документы · оплаты · касса</p>
+              </div>
+            </div>
+            <canvas ref="funnelChart" height="210"></canvas>
+          </article>
+
+          <article class="panel chart-panel">
+            <div class="panel-head">
+              <div>
+                <h3>Риски</h3>
+                <p>Критичные · высокие · средние · низкие</p>
+              </div>
+              <button type="button" class="ghost compact-button" @click="riskHelpOpen = !riskHelpOpen">
+                {{ riskHelpOpen ? 'Скрыть' : 'Как считается' }}
+              </button>
+            </div>
+            <canvas ref="riskChart" height="210"></canvas>
+            <div v-if="riskHelpOpen" class="risk-help">
+              <p>График показывает, сколько объектов попало в каждый уровень риска.</p>
+              <div class="risk-help-grid">
+                <span v-for="rule in riskHelpSummary.rules" :key="rule" class="risk-help-chip">{{ rule }}</span>
+              </div>
+              <div class="risk-help-grid">
+                <span v-for="reason in riskHelpSummary.reasons" :key="reason" class="risk-help-chip">{{ reason }}</span>
+              </div>
+              <p>Риск помогает выбрать, что проверить первым. Это не юридический вывод.</p>
+            </div>
           </article>
 
           <article v-if="readinessOpen" class="panel readiness-panel">
@@ -462,6 +515,12 @@
               <span class="risk-pill" :class="riskClass(objectCard.risk_level)">{{ objectCard.risk_label }} · {{ objectCard.risk_score }}</span>
               <span v-for="source in objectCard.sources" :key="source" class="pill muted">{{ source }}</span>
             </div>
+          <div v-if="objectCard?.diagnosis" class="object-diagnosis" :class="objectCard.diagnosis.severity">
+            <h4>{{ objectCard.diagnosis.title }}</h4>
+            <ul>
+              <li v-for="item in objectCard.diagnosis.bullets" :key="item">{{ item }}</li>
+            </ul>
+          </div>
           <div class="pipeline-line">
             <span>План {{ formatMoney(objectCard.pipeline?.plan) }}</span>
             <span>Документы {{ formatMoney(objectCard.pipeline?.documents) }}</span>

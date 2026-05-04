@@ -337,6 +337,36 @@ label span,
   margin-top: auto;
 }
 
+.risk-help {
+  display: grid;
+  gap: 10px;
+  padding: 12px 16px 16px;
+  border-top: 1px solid var(--line);
+  background: var(--panel-soft);
+}
+
+.risk-help p {
+  color: var(--text);
+  line-height: 1.45;
+}
+
+.risk-help-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+  gap: 8px;
+}
+
+.risk-help-chip {
+  min-height: 30px;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .ghost {
   background: rgba(255, 255, 255, 0.1);
   color: #e8eef5;
@@ -443,8 +473,9 @@ label span,
 
 .quick-start,
 .smart-search,
-.assistant-card,
 .answer-card,
+.next-actions,
+.demo-guide,
 .top-risks {
   /* Верхние рабочие блоки выглядят одинаково, чтобы быстрые сценарии,
      поиск и вывод считывались как единая зона действий. */
@@ -467,7 +498,6 @@ label span,
 
 .quick-start h3,
 .smart-search h3,
-.assistant-card h3,
 .answer-card h3 {
   color: var(--heading);
   font-size: 18px;
@@ -515,8 +545,27 @@ label span,
   font-size: 16px;
 }
 
+.command-button {
+  margin-top: 10px;
+}
+
 .examples {
   margin-top: 8px;
+}
+
+.command-status,
+.command-message {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.command-status.danger {
+  color: var(--danger);
+}
+
+.command-message {
+  color: var(--text);
 }
 
 .suggestions {
@@ -526,31 +575,33 @@ label span,
   margin-top: 12px;
 }
 
-.assistant-card {
-  display: grid;
-  gap: 12px;
-}
-
-.assistant-actions,
-.assistant-response,
-.empty-actions {
+.command-followups,
+.empty-actions,
+.next-action-list,
+.demo-guide {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 10px;
 }
 
-.assistant-response {
-  padding: 12px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--panel-soft);
+.command-followups,
+.next-action-list {
+  margin-top: 10px;
 }
 
-.assistant-response p {
-  flex-basis: 100%;
+.demo-guide {
   color: var(--text);
-  line-height: 1.45;
+}
+
+.demo-guide strong {
+  color: var(--heading);
+}
+
+.demo-guide span {
+  flex: 1 1 320px;
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .answer-card ul {
@@ -561,6 +612,21 @@ label span,
 .answer-card li {
   margin: 5px 0;
   color: var(--text);
+}
+
+.explain-button {
+  margin-top: 12px;
+}
+
+.explain-result {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.explain-result h4 {
+  color: var(--heading);
+  font-size: 15px;
 }
 
 .answer-card.warning {
@@ -602,6 +668,10 @@ label span,
   font-size: 12px;
 }
 
+.chart-panel canvas {
+  width: 100%;
+}
+
 .compare-insights {
   padding: 16px;
   border-bottom: 1px solid var(--line);
@@ -616,6 +686,38 @@ label span,
 .compare-insight-section h4 {
   margin: 0;
   color: var(--heading);
+}
+
+.object-diagnosis {
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+}
+
+.object-diagnosis.danger {
+  border-color: color-mix(in srgb, var(--danger) 36%, var(--line));
+  background: color-mix(in srgb, var(--danger) 9%, var(--panel));
+}
+
+.object-diagnosis.warning {
+  border-color: color-mix(in srgb, var(--warn) 36%, var(--line));
+  background: color-mix(in srgb, var(--warn) 9%, var(--panel));
+}
+
+.object-diagnosis h4 {
+  margin: 0 0 8px;
+  color: var(--heading);
+}
+
+.object-diagnosis ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.object-diagnosis li {
+  margin: 4px 0;
 }
 
 .view-tabs button {
@@ -719,6 +821,26 @@ label span,
   gap: 18px;
 }
 
+.workspace-grid .chart-panel {
+  min-height: 292px;
+}
+
+.workspace-grid .chart-panel:first-child {
+  min-height: 360px;
+}
+
+@media (min-width: 980px) {
+  .workspace-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .workspace-grid .chart-panel:first-child,
+  .workspace-grid .readiness-panel,
+  .workspace-grid .table-panel {
+    grid-column: 1 / -1;
+  }
+}
+
 .empty-state {
   padding: 20px;
   color: var(--muted);
@@ -763,7 +885,7 @@ label span,
 }
 
 .chart-panel {
-  padding-bottom: 12px;
+  padding-bottom: 8px;
 }
 
 canvas {
@@ -771,6 +893,11 @@ canvas {
   width: 100%;
   max-height: 300px;
   padding: 8px 14px 0;
+}
+
+.chart-panel canvas[height="210"] {
+  max-height: 230px;
+  padding-top: 4px;
 }
 
 .table-wrap {
@@ -1238,7 +1365,6 @@ summary {
   .view-tabs,
   .quick-start,
   .smart-search,
-  .assistant-card,
   .answer-card {
     margin-right: 14px;
     margin-left: 14px;

@@ -101,7 +101,7 @@ class PlaywrightUiTests(unittest.TestCase):
                 self.page.get_by_text("Короткий вывод").wait_for(timeout=10000)
 
     def test_smart_search_code_text_and_compare_enter_flow(self):
-        search = self.page.get_by_placeholder("Например: СКК Благовещенск").first
+        search = self.page.get_by_placeholder("Например: СКК Благовещенск без кассы на 01.04.2026").first
 
         search.fill("6105")
         self.page.get_by_text("Похоже, вы ищете СКК").wait_for(timeout=10000)
@@ -119,27 +119,27 @@ class PlaywrightUiTests(unittest.TestCase):
         search.press("Enter")
         self.page.get_by_text("Что изменилось:").wait_for(timeout=10000)
 
-    def test_assistant_rule_based_flow_and_alternative_action(self):
-        self.page.get_by_placeholder("Например: покажи СКК по Благовещенску").fill("Покажи СКК")
-        self.click_button("Понять запрос")
+    def test_command_rule_based_flow(self):
+        search = self.page.get_by_placeholder("Например: СКК Благовещенск без кассы на 01.04.2026")
+        search.fill("Покажи СКК")
+        search.press("Enter")
         self.page.get_by_text("Я понял запрос").wait_for(timeout=10000)
-        self.page.get_by_text("Правила").wait_for(timeout=10000)
-        self.click_button("Показать результат")
+        self.page.get_by_text("Запрос разобран по правилам").wait_for(timeout=10000)
         self.page.locator(".eyebrow", has_text="СКК").wait_for(timeout=10000)
         self.page.get_by_text("Короткий вывод").wait_for(timeout=10000)
 
-    def test_assistant_result_scrolls_to_tabs(self):
-        self.page.get_by_placeholder("Например: покажи СКК по Благовещенску").fill("СКК Благовещенск")
-        self.click_button("Понять запрос")
+    def test_command_result_scrolls_to_tabs(self):
+        search = self.page.get_by_placeholder("Например: СКК Благовещенск без кассы на 01.04.2026")
+        search.fill("СКК Благовещенск")
+        search.press("Enter")
         self.page.get_by_text("Я понял запрос").wait_for(timeout=10000)
-        self.click_button("Показать результат")
         self.assert_in_viewport(self.page.locator(".view-tabs"))
 
     def test_quick_start_scrolls_to_tabs_after_previous_search(self):
-        self.page.get_by_placeholder("Например: покажи СКК по Благовещенску").fill("СКК Благовещенск")
-        self.click_button("Понять запрос")
+        search = self.page.get_by_placeholder("Например: СКК Благовещенск без кассы на 01.04.2026")
+        search.fill("СКК Благовещенск")
+        search.press("Enter")
         self.page.get_by_text("Я понял запрос").wait_for(timeout=10000)
-        self.click_button("Показать результат")
         self.assert_in_viewport(self.page.locator(".view-tabs"))
 
         self.page.evaluate("window.scrollTo(0, 0)")
@@ -165,10 +165,10 @@ class PlaywrightUiTests(unittest.TestCase):
         self.assertLess(y, 250)
 
     def test_quick_start_resets_previous_assistant_search_scope(self):
-        self.page.get_by_placeholder("Например: покажи СКК по Благовещенску").fill("СКК Благовещенск")
-        self.click_button("Понять запрос")
+        search = self.page.get_by_placeholder("Например: СКК Благовещенск без кассы на 01.04.2026")
+        search.fill("СКК Благовещенск")
+        search.press("Enter")
         self.page.get_by_text("Я понял запрос").wait_for(timeout=10000)
-        self.click_button("Показать результат")
         self.page.wait_for_url(lambda url: True, timeout=1000)
         filtered_summary = self.page.locator(".answer-card").inner_text()
 
@@ -183,6 +183,68 @@ class PlaywrightUiTests(unittest.TestCase):
         self.click_button("Проблемные СКК")
         self.page.get_by_text("Что требует внимания").wait_for(timeout=10000)
         self.page.get_by_text("Главные риски").wait_for(timeout=10000)
+        body = self.page.locator("body").inner_text()
+        self.assertNotIn("problem_reasons", body)
+        self.assertNotIn("pipeline", body)
+
+    def test_demo_60_seconds_flow(self):
+        self.click_button("Демо за 60 секунд")
+        self.page.get_by_text("Демо-сценарий").wait_for(timeout=10000)
+        self.page.get_by_text("Главные риски").wait_for(timeout=10000)
+        self.page.get_by_role("heading", name="Проблемы").wait_for(timeout=10000)
+        self.click_button("Открыть главный риск")
+        self.page.get_by_text("Что проверить").wait_for(timeout=10000)
+
+    def test_next_actions_visible_after_quick_action(self):
+        self.click_button("Собрать отчет СКК")
+        self.page.get_by_text("Что делать дальше").wait_for(timeout=10000)
+        self.click_button("Показать без кассы")
+        self.page.get_by_role("heading", name="Проблемы").wait_for(timeout=10000)
+
+    def test_pdf_download_button_visible(self):
+        self.page.get_by_role("button", name="Скачать PDF").first.wait_for(timeout=10000)
+
+    def test_pdf_download(self):
+        try:
+            import reportlab  # noqa: F401
+        except ImportError:
+            self.skipTest("reportlab is not installed")
+        self.click_button("Собрать отчет СКК")
+        with self.page.expect_download() as download_info:
+            self.click_button("Скачать PDF")
+        download = download_info.value
+        self.assertRegex(download.suggested_filename, r"analytics_.*\.pdf")
+
+    def test_overview_charts_are_visible(self):
+        self.click_button("Собрать отчет СКК")
+        self.page.get_by_text("Воронка денег").wait_for(timeout=10000)
+        self.page.get_by_role("heading", name="Риски").wait_for(timeout=10000)
+        canvas = self.page.locator("canvas").nth(1)
+        canvas.wait_for(timeout=10000)
+        box = canvas.bounding_box()
+        self.assertIsNotNone(box)
+        self.assertGreater(box["width"], 20)
+        has_pixels = canvas.evaluate(
+            """(node) => {
+                const ctx = node.getContext('2d');
+                const data = ctx.getImageData(0, 0, node.width, node.height).data;
+                for (let i = 3; i < data.length; i += 4) {
+                    if (data[i] !== 0) return true;
+                }
+                return false;
+            }"""
+        )
+        self.assertTrue(has_pixels)
+
+    def test_risk_chart_help_is_collapsed_and_opens(self):
+        self.click_button("Собрать отчет СКК")
+        self.page.get_by_role("heading", name="Риски").wait_for(timeout=10000)
+        body = self.page.locator("body").inner_text()
+        self.assertNotIn("Риск помогает выбрать", body)
+        self.click_button("Как считается")
+        self.page.get_by_text("График показывает").wait_for(timeout=10000)
+        self.page.get_by_text("Критичный: от 75").wait_for(timeout=10000)
+        self.page.get_by_text("не юридический вывод").wait_for(timeout=10000)
         body = self.page.locator("body").inner_text()
         self.assertNotIn("problem_reasons", body)
         self.assertNotIn("pipeline", body)
@@ -258,6 +320,10 @@ class PlaywrightUiTests(unittest.TestCase):
             self.click_button("Скачать Excel")
         excel = excel_info.value
         self.assertRegex(excel.suggested_filename, r"analytics_.*\.xlsx")
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / excel.suggested_filename
+            excel.save_as(target)
+            self.assertGreater(target.stat().st_size, 0)
 
     def test_no_technical_words_on_primary_screen(self):
         body_text = self.page.locator("body").inner_text()

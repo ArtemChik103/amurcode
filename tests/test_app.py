@@ -1,9 +1,12 @@
 import json
+import os
+import tempfile
 import threading
 import unittest
 from io import BytesIO
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import quote
 
 import app
@@ -137,6 +140,13 @@ class DataLoadTests(unittest.TestCase):
             self.assertIn(code, app.QUICK_ACTIONS)
             self.assertIn("metrics", app.QUICK_ACTIONS[code])
 
+    def test_demo_quick_action_is_first_and_uses_skk_problem_flow(self):
+        first = app.quick_actions_payload()[0]
+        self.assertEqual(first["code"], "demo_60s")
+        self.assertEqual(first["template"], "skk")
+        self.assertEqual(first["post_filter"], "execution_problems")
+        self.assertEqual(first["open_view"], "problems")
+
     def test_low_execution_post_filter_keeps_problem_rows_only(self):
         metrics = ["limit", "cash", "payment", "buau"]
         result = app.aggregate(self.store.records, metrics)
@@ -202,6 +212,24 @@ class DataLoadTests(unittest.TestCase):
         self.assertIn("object_key", row)
         self.assertIn("match_confidence", row)
 
+    def test_attention_summary_includes_next_actions(self):
+        result = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"]})
+        actions = result["attention_summary"]["next_actions"]
+        self.assertTrue(actions)
+        self.assertIn("Скачать Excel", [item["label"] for item in actions])
+
+    def test_next_actions_include_pdf_download(self):
+        result = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"]})
+        actions = [item["action"] for item in result["attention_summary"]["next_actions"]]
+        self.assertIn({"download": "pdf"}, actions)
+
+    def test_top_risks_include_short_fields(self):
+        result = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"], "post_filter": ["execution_problems"]})
+        top = result["attention_summary"]["top_risks"][0]
+        self.assertIn("short_name", top)
+        self.assertIn("object_code", top)
+        self.assertIn("budget", top)
+
     def test_risk_score_and_level_are_added_to_rows(self):
         result = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"]})
         row = result["rows"][0]
@@ -209,6 +237,14 @@ class DataLoadTests(unittest.TestCase):
         self.assertIn("risk_level", row)
         self.assertIn("risk_label", row)
         self.assertIn("risk_explanation", row)
+
+    def test_risk_distribution_source_fields_stay_human_readable(self):
+        result = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"]})
+        row = result["rows"][0]
+        self.assertIsInstance(row.get("risk_label"), str)
+        self.assertIsInstance(row.get("risk_explanation"), list)
+        self.assertNotIn("problem_reasons", row["risk_label"])
+        self.assertNotIn("pipeline", " ".join(row["risk_explanation"]))
 
     def test_attention_summary_returns_human_bullets(self):
         result = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"]})
@@ -252,6 +288,13 @@ class DataLoadTests(unittest.TestCase):
         self.assertIn("risk_score", detail)
         self.assertIn("risk_label", detail)
 
+    def test_object_detail_includes_diagnosis(self):
+        query = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"], "post_filter": ["execution_problems"]})
+        key = query["rows"][0]["object_key"]
+        detail = app.object_detail({"date": ["2026-04-01"], "template": ["skk"], "object_key": [key]})
+        self.assertEqual(detail["diagnosis"]["title"], "Что проверить")
+        self.assertTrue(detail["diagnosis"]["bullets"])
+
     def test_readiness_summary_returns_checks(self):
         payload = app.readiness_response({"date": ["2026-04-01"], "template": ["skk"]})
         self.assertEqual(payload["date"], "2026-04-01")
@@ -279,6 +322,7 @@ class DataLoadTests(unittest.TestCase):
     def test_assistant_rule_based_core_intents(self):
         skk = app.assistant_rule_based("Покажи СКК", {})
         self.assertEqual(skk["action"]["template"], "skk")
+        self.assertIn("followups", skk)
         self.assertEqual(skk["alternatives"][0]["label"], "Показать все данные")
         self.assertEqual(skk["alternatives"][0]["action"]["q"], "")
 
@@ -297,6 +341,68 @@ class DataLoadTests(unittest.TestCase):
 
         explain = app.assistant_rule_based("что такое БО", {})
         self.assertEqual(explain["intent"], "explain_metric")
+
+    def test_env_loader_reads_local_env_file(self):
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
+            handle.write("CODEX_TEST_ENV_LOADER='ok'\n")
+            path = Path(handle.name)
+        try:
+            os.environ.pop("CODEX_TEST_ENV_LOADER", None)
+            app.load_local_env(path)
+            self.assertEqual(os.environ.get("CODEX_TEST_ENV_LOADER"), "ok")
+        finally:
+            os.environ.pop("CODEX_TEST_ENV_LOADER", None)
+            path.unlink(missing_ok=True)
+
+    def test_env_loader_missing_file_is_noop(self):
+        app.load_local_env(app.ROOT / "missing-test-env-file")
+
+    def test_validate_assistant_action_rejects_unknown_fields(self):
+        fallback = app.assistant_rule_based("Покажи СКК", {})["action"]
+        action = app.validate_assistant_action(
+            {
+                "mode": "slice",
+                "template": "skk",
+                "date": "2026-04-01",
+                "post_filter": "no_cash",
+                "endpoint": "/api/trace",
+                "q": "x" * 250,
+            },
+            fallback,
+        )
+        self.assertNotIn("endpoint", action)
+        self.assertEqual(action["q"], "x" * 200)
+        self.assertEqual(action["post_filter"], "no_cash")
+
+    def test_assistant_schema_contains_only_allowed_actions(self):
+        schema = app.assistant_json_schema()
+        action_properties = schema["properties"]["action"]["properties"]
+        self.assertEqual(set(action_properties), app.ASSISTANT_ACTION_FIELDS)
+        self.assertNotIn("endpoint", action_properties)
+
+    def test_assistant_complex_problem_query_maps_to_problem_filter(self):
+        old_key = os.environ.pop("GROQ_API_KEY", None)
+        self.addCleanup(lambda: os.environ.__setitem__("GROQ_API_KEY", old_key) if old_key is not None else os.environ.pop("GROQ_API_KEY", None))
+        payload = app.assistant_response("покажи проблемные СКК без кассы", {"mode": "slice", "template": "all"})
+        self.assertEqual(payload["action"]["template"], "skk")
+        self.assertIn(payload["action"]["post_filter"], {"execution_problems", "no_cash"})
+        self.assertEqual(payload["action"]["open_view"], "problems")
+
+    def test_malformed_llm_response_falls_back_rule_based(self):
+        old_key = os.environ.get("GROQ_API_KEY")
+        original = app.assistant_llm
+        os.environ["GROQ_API_KEY"] = "test-key"
+        app.assistant_llm = lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("bad llm"))
+        try:
+            payload = app.assistant_response("Покажи СКК", {})
+            self.assertEqual(payload["mode"], "rule_based")
+            self.assertEqual(payload["action"]["template"], "skk")
+        finally:
+            app.assistant_llm = original
+            if old_key is None:
+                os.environ.pop("GROQ_API_KEY", None)
+            else:
+                os.environ["GROQ_API_KEY"] = old_key
 
     def test_rag_loader_reads_markdown_documents(self):
         documents = app.load_rag_documents()
@@ -401,7 +507,50 @@ class HttpTests(unittest.TestCase):
         method_text = "\n".join(str(row[0] or "") for row in workbook["Методика"].iter_rows(values_only=True))
         self.assertIn("последний месячный срез", method_text)
 
+        try:
+            import reportlab  # noqa: F401
+        except ImportError:
+            return
+        status, content_type, body = self.request("/api/export.pdf?date=2026-04-01&template=skk")
+        self.assertEqual(status, 200)
+        self.assertIn("application/pdf", content_type)
+        self.assertTrue(body.startswith(b"%PDF"))
+
+    def test_excel_export_has_formatting(self):
+        content, _ = app.export_excel({"date": ["2026-04-01"], "template": ["skk"]})
+        workbook = load_workbook(BytesIO(content))
+        self.assertEqual(workbook.sheetnames, ["Выводы", "Итоги", "Объекты", "Проблемы", "Исходные строки", "Методика"])
+        self.assertEqual(workbook["Выводы"].freeze_panes, "A4")
+        self.assertEqual(workbook["Итоги"].freeze_panes, "A2")
+        self.assertTrue(workbook["Объекты"].auto_filter.ref)
+        self.assertTrue(workbook["Итоги"]["A1"].font.bold)
+        self.assertEqual(workbook["Итоги"]["A1"].font.color.rgb, "00FFFFFF")
+        выводы = "\n".join(str(row[0] or "") for row in workbook["Выводы"].iter_rows(values_only=True))
+        self.assertIn("Следующие действия", выводы)
+
+    def test_pdf_export_endpoint_or_function_returns_pdf(self):
+        try:
+            import reportlab  # noqa: F401
+        except ImportError:
+            self.skipTest("reportlab is not installed")
+        body, filename = app.export_pdf({"date": ["2026-04-01"], "template": ["skk"]})
+        self.assertTrue(body.startswith(b"%PDF"))
+        self.assertTrue(filename.endswith(".pdf"))
+        self.assertGreater(len(body), 1000)
+
+    def test_pdf_export_compare_returns_pdf(self):
+        try:
+            import reportlab  # noqa: F401
+        except ImportError:
+            self.skipTest("reportlab is not installed")
+        body, filename = app.export_pdf({"mode": ["compare"], "base": ["2025-02-01"], "target": ["2026-04-01"], "template": ["skk"]})
+        self.assertTrue(body.startswith(b"%PDF"))
+        self.assertTrue(filename.endswith(".pdf"))
+        self.assertGreater(len(body), 1000)
+
     def test_assistant_endpoint_returns_rule_based_json_without_groq(self):
+        old_key = os.environ.pop("GROQ_API_KEY", None)
+        self.addCleanup(lambda: os.environ.__setitem__("GROQ_API_KEY", old_key) if old_key is not None else os.environ.pop("GROQ_API_KEY", None))
         status, content_type, body = self.request(
             "/api/assistant",
             method="POST",
@@ -410,8 +559,22 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("application/json", content_type)
         payload = json.loads(body.decode("utf-8"))
-        self.assertIn(payload["mode"], {"rule_based", "llm"})
+        self.assertEqual(payload["mode"], "rule_based")
         self.assertEqual(payload["action"]["template"], "skk")
+
+    def test_explain_endpoint_returns_rule_based_without_groq(self):
+        old_key = os.environ.pop("GROQ_API_KEY", None)
+        self.addCleanup(lambda: os.environ.__setitem__("GROQ_API_KEY", old_key) if old_key is not None else os.environ.pop("GROQ_API_KEY", None))
+        status, content_type, body = self.request(
+            "/api/explain",
+            method="POST",
+            payload={"kind": "query", "payload": {"attention_summary": {"bullets": ["Главная проблема - нет кассы."]}}},
+        )
+        self.assertEqual(status, 200)
+        self.assertIn("application/json", content_type)
+        payload = json.loads(body.decode("utf-8"))
+        self.assertEqual(payload["mode"], "rule_based")
+        self.assertTrue(payload["bullets"])
 
     def test_quick_actions_run_against_public_api(self):
         status, _, body = self.request("/api/catalog/quick-actions")
@@ -437,6 +600,11 @@ class HttpTests(unittest.TestCase):
 
 
 class StaticFilesTests(unittest.TestCase):
+    def test_gitignore_mentions_env(self):
+        gitignore = (app.ROOT / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn(".env", gitignore)
+        self.assertIn("!.env.example", gitignore)
+
     def test_frontend_assets_exist_and_reference_api(self):
         index = (app.STATIC_DIR / "index.html").read_text(encoding="utf-8")
         script = (app.STATIC_DIR / "app.js").read_text(encoding="utf-8")
@@ -452,6 +620,7 @@ class StaticFilesTests(unittest.TestCase):
         self.assertIn("/api/export.xlsx", script)
         self.assertIn("/api/catalog/quick-actions", script)
         self.assertIn("/api/assistant", script)
+        self.assertIn("/api/explain", script)
         self.assertIn("grid-template-columns", styles)
 
     def test_vue_frontend_is_declarative(self):
@@ -472,24 +641,24 @@ class StaticFilesTests(unittest.TestCase):
             "exportExcel",
             "openObject",
             "quickActions",
-            "smartInput",
-            "assistant",
+            "command",
             "applyQuickAction",
-            "buildSmartSuggestions",
-            "askAssistant",
-            "applyAssistantAction",
+            "buildCommandSuggestions",
+            "runCommand",
+            "explainResult",
             "resultNarrative",
             "simpleRows",
             "problemRows",
         ):
             self.assertIn(marker, script)
         for marker in (
-            "Спросить помощника",
+            "Напишите, что нужно получить",
             "Короткий вывод",
             "Объекты",
             "Проблемы",
         ):
             self.assertIn(marker, index)
+        self.assertNotIn("Спросить помощника", index)
         for legacy_marker in (
             "document.querySelector",
             "innerHTML =",
