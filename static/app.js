@@ -898,11 +898,17 @@ createApp({
             post_filter: this.filters.post_filter,
           },
         };
-        this.explanation = await fetchJson("/api/explain", {
+        const explanation = await fetchJson("/api/explain", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ kind: this.mode === "compare" ? "compare" : "query", payload }),
         });
+        const shownBullets = (this.resultNarrative.bullets || []).map((item) => String(item).trim()).filter(Boolean);
+        const explanationBullets = (explanation.bullets || []).map((item) => String(item).trim()).filter(Boolean);
+        const isDuplicate =
+          shownBullets.length === explanationBullets.length &&
+          shownBullets.every((item, index) => item === explanationBullets[index]);
+        this.explanation = isDuplicate ? null : explanation;
       } catch (error) {
         console.error(error);
         this.error = "Не удалось получить простое объяснение.";

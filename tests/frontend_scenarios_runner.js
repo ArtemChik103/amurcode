@@ -8,6 +8,7 @@ let emittedDownloads = [];
 let emittedDialogs = 0;
 let lastFetch = null;
 let scrollCalls = 0;
+let explainResponse = { mode: "rule_based", title: "Короткое объяснение", bullets: ["Сначала проверьте кассу."], next_actions: [] };
 
 const context = {
   console,
@@ -102,7 +103,7 @@ context.fetch = async (url, options = {}) => {
     return {
       ok: true,
       status: 200,
-      json: async () => ({ mode: "rule_based", title: "Короткое объяснение", bullets: ["Сначала проверьте кассу."], next_actions: [] }),
+      json: async () => explainResponse,
     };
   }
   if (String(url).startsWith("/api/trace")) {
@@ -365,6 +366,22 @@ function makeInstance() {
   await vmApp.explainResult();
   assert.equal(lastFetch.url, "/api/explain");
   assert.equal(vmApp.explanation.title, "Короткое объяснение");
+
+  vmApp.mode = "slice";
+  vmApp.query.rows = [{ object_code: "1", object_name: "Объект", budget: "Бюджет" }];
+  vmApp.query.attention_summary = {
+    title: "Что требует внимания",
+    bullets: ["6 объектов без кассового исполнения.", "7 объектов с планом, но без документов."],
+    severity: "warning",
+  };
+  explainResponse = {
+    mode: "rule_based",
+    title: "Короткое объяснение",
+    bullets: ["6 объектов без кассового исполнения.", "7 объектов с планом, но без документов."],
+    next_actions: [],
+  };
+  await vmApp.explainResult();
+  assert.equal(vmApp.explanation, null);
 
   vmApp.requestResultScroll();
   assert.equal(vmApp.pendingResultScroll, true);
