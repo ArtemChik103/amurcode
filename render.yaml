@@ -9,4 +9,4 @@ services:
       - key: ASSISTANT_ENABLED
         value: auto
       - key: GROQ_MODEL
-        value: openai/gpt-oss-120b
+        value: llama-3.1-8b-instant
