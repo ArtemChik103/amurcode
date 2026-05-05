@@ -96,6 +96,28 @@
                 <span>{{ metric.label }}</span>
               </label>
             </section>
+
+            <section class="metric-box import-box" aria-label="Загрузить данные">
+              <div class="section-title">Загрузить данные</div>
+              <label>
+                <span>Источник</span>
+                <select v-model="importForm.source_type">
+                  <option value="rcb">РЧБ</option>
+                  <option value="agreements">Соглашения</option>
+                  <option value="state_task_contracts">ГЗ: контракты</option>
+                  <option value="state_task_payments">ГЗ: платежи</option>
+                  <option value="buau">БУ/АУ</option>
+                </select>
+              </label>
+              <label>
+                <span>Файл CSV/XLSX</span>
+                <input type="file" accept=".csv,.xlsx" @change="onImportFileChange" />
+              </label>
+              <button type="button" class="ghost full-width" :disabled="loading.import" @click="uploadData">
+                {{ loading.import ? 'Загрузка...' : 'Загрузить' }}
+              </button>
+              <div v-if="importError" class="command-status danger">{{ importError }}</div>
+            </section>
           </div>
         </section>
 

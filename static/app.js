@@ -54,6 +54,11 @@ createApp({
       readinessOpen: false,
       controlOpen: false,
       advancedOpen: false,
+      importForm: {
+        source_type: "rcb",
+        file: null,
+      },
+      importError: "",
 
       assistant: {
         message: "",
@@ -149,6 +154,7 @@ createApp({
         explain: false,
         control: false,
         review: false,
+        import: false,
       },
 
       error: "",
@@ -601,6 +607,39 @@ createApp({
         return;
       }
       return this.loadControl();
+    },
+
+    onImportFileChange(event) {
+      this.importForm.file = event.target.files?.[0] || null;
+      this.importError = "";
+    },
+
+    async uploadData() {
+      this.importError = "";
+      if (!this.importForm.source_type || !this.importForm.file) {
+        this.importError = "Выберите источник и файл.";
+        return;
+      }
+      this.loading.import = true;
+      try {
+        const form = new FormData();
+        form.append("source_type", this.importForm.source_type);
+        form.append("file", this.importForm.file);
+        const params = this.buildQueryParams(this.mode !== "compare");
+        if (this.mode === "compare") params.set("date", this.filters.target || "");
+        this.control = await fetchJson(`/api/import?${params.toString()}`, {
+          method: "POST",
+          body: form,
+        });
+        this.controlOpen = true;
+        await this.loadInitialData();
+        await this.loadData();
+      } catch (error) {
+        console.error(error);
+        this.importError = "Не удалось загрузить файл. Проверьте формат и источник.";
+      } finally {
+        this.loading.import = false;
+      }
     },
 
     buildQueryParams(includeDates) {

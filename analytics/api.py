@@ -8,6 +8,7 @@ HTTP API и экспорт Excel. Данные держатся в памяти,
 from __future__ import annotations
 
 import csv
+import cgi
 import json
 import os
 import re
@@ -27,12 +28,21 @@ from urllib.request import Request, urlopen
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "case"
 DATA_RUNTIME_DIR = ROOT / "data"
+DATA_UPLOADS_DIR = DATA_RUNTIME_DIR / "uploads"
 REVIEWS_PATH = DATA_RUNTIME_DIR / "reviews.json"
 STATIC_DIR = ROOT / "static"
 RAG_DIR = ROOT / "docs" / "rag"
 QUALITY_ISSUES: list[dict] = []
 LOAD_STATS: dict[str, dict[str, int]] = {}
 MONEY_ZERO = Decimal("0.00")
+IMPORT_SOURCE_TYPES = {
+    "rcb": "РЧБ",
+    "agreements": "Соглашения",
+    "state_task_contracts": "ГЗ: контракты",
+    "state_task_payments": "ГЗ: платежи",
+    "buau": "БУАУ",
+}
+IMPORT_MAX_BYTES = 50 * 1024 * 1024
 
 
 def load_local_env(path: Path = ROOT / ".env") -> None:
@@ -210,6 +220,92 @@ def relative_source(path: Path | str) -> str:
         return str(Path(path).resolve().relative_to(ROOT)).replace("\\", "/")
     except ValueError:
         return str(path).replace("\\", "/")
+
+
+def uploaded_paths(source_type: str) -> list[Path]:
+    folder = DATA_UPLOADS_DIR / source_type
+    if not folder.exists():
+        return []
+    return sorted([*folder.glob("*.csv"), *folder.glob("*.xlsx")])
+
+
+def csv_dict_rows(path: Path, delimiter: str = ",") -> list[dict[str, str]]:
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        return list(csv.DictReader(handle, delimiter=delimiter))
+
+
+def xlsx_dict_rows(path: Path) -> list[dict[str, str]]:
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(path, read_only=True, data_only=True)
+    try:
+        sheet = workbook.active
+        rows = list(sheet.iter_rows(values_only=True))
+    finally:
+        workbook.close()
+    if not rows:
+        return []
+    headers = [str(value or "").strip() for value in rows[0]]
+    result = []
+    for values in rows[1:]:
+        if not any(value not in (None, "") for value in values):
+            continue
+        result.append({header: "" if value is None else str(value) for header, value in zip(headers, values) if header})
+    return result
+
+
+def dict_rows(path: Path, delimiter: str = ",") -> list[dict[str, str]]:
+    if path.suffix.lower() == ".xlsx":
+        return xlsx_dict_rows(path)
+    return csv_dict_rows(path, delimiter)
+
+
+def csv_raw_rows(path: Path, delimiter: str = ";") -> list[list[str]]:
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        return list(csv.reader(handle, delimiter=delimiter))
+
+
+def xlsx_raw_rows(path: Path) -> list[list[str]]:
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(path, read_only=True, data_only=True)
+    try:
+        sheet = workbook.active
+        return [["" if value is None else str(value) for value in row] for row in sheet.iter_rows(values_only=True)]
+    finally:
+        workbook.close()
+
+
+def raw_rows(path: Path, delimiter: str = ";") -> list[list[str]]:
+    if path.suffix.lower() == ".xlsx":
+        return xlsx_raw_rows(path)
+    return csv_raw_rows(path, delimiter)
+
+
+def sanitize_upload_filename(filename: str) -> str:
+    name = Path(filename or "upload").name
+    return re.sub(r"[^0-9A-Za-zА-Яа-яЁё._-]+", "_", name).strip("._") or "upload"
+
+
+def unique_upload_path(source_type: str, filename: str) -> Path:
+    folder = DATA_UPLOADS_DIR / source_type
+    folder.mkdir(parents=True, exist_ok=True)
+    safe_name = sanitize_upload_filename(filename)
+    target = folder / safe_name
+    if target.exists():
+        stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        target = folder / f"{target.stem}_{stamp}{target.suffix}"
+    return target
+
+
+def import_payload(params: dict[str, list[str]] | None = None) -> dict:
+    return control_summary(params or {})
+
+
+def save_import_upload(source_type: str, filename: str, content: bytes) -> Path:
+    target = unique_upload_path(source_type, filename)
+    target.write_bytes(content)
+    return target
 
 
 def add_quality_issue(
@@ -716,9 +812,8 @@ def finish_load_stats(stats: dict[str, int], issue_start: int) -> None:
 def load_rcb(records: list[dict]) -> None:
     """Читает РЧБ как месячные срезы лимитов, БО и кассового исполнения."""
     folder = DATA_DIR / "1_RCB"
-    for path in sorted(folder.glob("*.csv")):
-        with path.open("r", encoding="utf-8-sig", newline="") as handle:
-            rows = list(csv.reader(handle, delimiter=";"))
+    for path in sorted(folder.glob("*.csv")) + uploaded_paths("rcb"):
+        rows = raw_rows(path, delimiter=";")
         header_index = next(
             (i for i, row in enumerate(rows) if row and row[0].strip() == "Бюджет"),
             None,
@@ -779,10 +874,9 @@ def load_agreements(records: list[dict]) -> None:
         "272": "Госзадание",
         "313": "ЮЛ/ИП/ФЛ",
     }
-    for path in sorted(folder.glob("*.csv")):
+    for path in sorted(folder.glob("*.csv")) + uploaded_paths("agreements"):
         source_file = relative_source(path)
-        with path.open("r", encoding="utf-8-sig", newline="") as handle:
-            for row_number, row in enumerate(csv.DictReader(handle), start=2):
+        for row_number, row in enumerate(dict_rows(path), start=2):
                 kcsr = display_code(row.get("kcsr_code"))
                 recipient = (row.get("dd_recipient_caption") or row.get("dd_estimate_caption") or "").strip()
                 document_id = (row.get("document_id") or row.get("id") or row.get("reg_number") or "").strip()
@@ -831,15 +925,13 @@ def load_state_task(records: list[dict]) -> None:
     payments_path = folder / "Платежки.csv"
 
     if lines_path.exists():
-        with lines_path.open("r", encoding="utf-8-sig", newline="") as handle:
-            for row in csv.DictReader(handle):
-                budget_lines[row["con_document_id"]].append(row)
+        for row in dict_rows(lines_path):
+            budget_lines[row["con_document_id"]].append(row)
 
     contracts: dict[str, dict[str, str]] = {}
-    if contracts_path.exists():
-        source_file = relative_source(contracts_path)
-        with contracts_path.open("r", encoding="utf-8-sig", newline="") as handle:
-            for row_number, row in enumerate(csv.DictReader(handle), start=2):
+    for path in ([contracts_path] if contracts_path.exists() else []) + uploaded_paths("state_task_contracts"):
+        source_file = relative_source(path)
+        for row_number, row in enumerate(dict_rows(path), start=2):
                 contracts[row["con_document_id"]] = row
                 document_date = parse_date(row.get("con_date"))
                 for line in budget_lines.get(row["con_document_id"], [{}]):
@@ -878,10 +970,9 @@ def load_state_task(records: list[dict]) -> None:
                         )
                     )
 
-    if payments_path.exists():
-        source_file = relative_source(payments_path)
-        with payments_path.open("r", encoding="utf-8-sig", newline="") as handle:
-            for row_number, row in enumerate(csv.DictReader(handle), start=2):
+    for path in ([payments_path] if payments_path.exists() else []) + uploaded_paths("state_task_payments"):
+        source_file = relative_source(path)
+        for row_number, row in enumerate(dict_rows(path), start=2):
                 contract = contracts.get(row["con_document_id"], {})
                 related_lines = budget_lines.get(row["con_document_id"], [{}])
                 document_date = parse_date(row.get("platezhka_paydate"))
@@ -925,11 +1016,10 @@ def load_state_task(records: list[dict]) -> None:
 def load_buau(records: list[dict]) -> None:
     """Читает выплаты БУ/АУ как события, накопительные к выбранной дате."""
     folder = DATA_DIR / "4_BUAU_Export"
-    for path in sorted(folder.glob("*.csv")):
+    for path in sorted(folder.glob("*.csv")) + uploaded_paths("buau"):
         snapshot = buau_snapshot(path.name)
         source_file = relative_source(path)
-        with path.open("r", encoding="utf-8-sig", newline="") as handle:
-            for row_number, row in enumerate(csv.DictReader(handle, delimiter=";"), start=2):
+        for row_number, row in enumerate(dict_rows(path, delimiter=";"), start=2):
                 kcsr = display_code(row.get("КЦСР"))
                 organization = (row.get("Организация") or "").strip()
                 event_date = parse_date(row.get("Дата проводки")) or snapshot
@@ -2960,6 +3050,9 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/import":
+            self.handle_import(parse_qs(parsed.query))
+            return
         if parsed.path == "/api/review":
             try:
                 length = int(self.headers.get("Content-Length", "0") or "0")
@@ -2995,6 +3088,57 @@ class Handler(SimpleHTTPRequestHandler):
                 self.write_json({"error": "invalid_json"}, status=400)
             return
         self.write_json({"error": "not_found"}, status=404)
+
+    def handle_import(self, params: dict[str, list[str]] | None = None) -> None:
+        global STORE
+        try:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+        except ValueError:
+            self.write_json({"error": "invalid_request"}, status=400)
+            return
+        if length > IMPORT_MAX_BYTES:
+            self.write_json({"error": "file_too_large"}, status=400)
+            return
+        form = cgi.FieldStorage(
+            fp=self.rfile,
+            headers=self.headers,
+            environ={
+                "REQUEST_METHOD": "POST",
+                "CONTENT_TYPE": self.headers.get("Content-Type", ""),
+                "CONTENT_LENGTH": str(length),
+            },
+        )
+        source_type = str(form.getfirst("source_type") or "").strip()
+        if source_type not in IMPORT_SOURCE_TYPES:
+            self.write_json({"error": "source_type_required"}, status=400)
+            return
+        file_item = form["file"] if "file" in form else None
+        if file_item is None or not getattr(file_item, "filename", ""):
+            self.write_json({"error": "file_required"}, status=400)
+            return
+        filename = sanitize_upload_filename(file_item.filename)
+        extension = Path(filename).suffix.lower()
+        if extension not in {".csv", ".xlsx"}:
+            self.write_json({"error": "invalid_extension"}, status=400)
+            return
+        content = file_item.file.read()
+        if len(content) > IMPORT_MAX_BYTES:
+            self.write_json({"error": "file_too_large"}, status=400)
+            return
+        target = save_import_upload(source_type, filename, content)
+        try:
+            STORE = load_data()
+        except Exception:
+            add_quality_issue(
+                relative_source(target),
+                "",
+                "error",
+                "import_parse_failed",
+                "Не удалось разобрать импортированный файл",
+                "file",
+                filename,
+            )
+        self.write_json(import_payload(params or {}))
 
     def write_json(self, payload: object, status: int = 200) -> None:
         body = json.dumps(json_safe(payload), ensure_ascii=False).encode("utf-8")

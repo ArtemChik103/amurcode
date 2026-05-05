@@ -503,6 +503,39 @@ class HttpTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def request_multipart(self, path, fields, file_field=None):
+        boundary = "----codex-test-boundary"
+        parts = []
+        for name, value in fields.items():
+            parts.append(
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                f"{value}\r\n".encode("utf-8")
+            )
+        if file_field:
+            name, filename, content_type, content = file_field
+            parts.append(
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'
+                f"Content-Type: {content_type}\r\n\r\n".encode("utf-8")
+                + content
+                + b"\r\n"
+            )
+        parts.append(f"--{boundary}--\r\n".encode("utf-8"))
+        body = b"".join(parts)
+        conn = HTTPConnection("127.0.0.1", self.port, timeout=20)
+        try:
+            conn.request(
+                "POST",
+                path,
+                body=body,
+                headers={"Content-Type": f"multipart/form-data; boundary={boundary}", "Content-Length": str(len(body))},
+            )
+            response = conn.getresponse()
+            return response.status, response.getheader("Content-Type"), response.read()
+        finally:
+            conn.close()
+
     def test_meta_endpoint_returns_json(self):
         status, content_type, body = self.request("/api/meta")
         self.assertEqual(status, 200)
@@ -603,6 +636,51 @@ class HttpTests(unittest.TestCase):
                 self.assertEqual(json.loads(body.decode("utf-8"))["error"], "invalid_status")
             finally:
                 app.REVIEWS_PATH = original_path
+
+    def test_import_rejects_wrong_extension(self):
+        status, _, body = self.request_multipart(
+            "/api/import",
+            {"source_type": "rcb"},
+            ("file", "bad.txt", "text/plain", b"not csv"),
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(body.decode("utf-8"))["error"], "invalid_extension")
+
+    def test_import_requires_source_type(self):
+        status, _, body = self.request_multipart(
+            "/api/import",
+            {},
+            ("file", "data.csv", "text/csv", b"a,b\r\n1,2\r\n"),
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(body.decode("utf-8"))["error"], "source_type_required")
+
+    def test_successful_import_updates_meta_records(self):
+        original_uploads = app.DATA_UPLOADS_DIR
+        original_store = app.STORE
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app.DATA_UPLOADS_DIR = Path(temp_dir) / "uploads"
+            try:
+                before = app.STORE.meta["records"]
+                content = (
+                    "Отчет на 01.04.2026\r\n"
+                    "Бюджет;КЦСР;Наименование КЦСР;КФСР;КВР;КОСГУ;Наименование КВСР;Наименование КВР;Лимиты ПБС;Подтв. лимитов по БО;Всего выбытий;Дата проводки\r\n"
+                    "Тестовый бюджет;999996105;Импорт тест;01;244;226;Ведомство;Услуга;100,00;0;10,00;01.04.2026\r\n"
+                ).encode("utf-8-sig")
+                status, content_type, body = self.request_multipart(
+                    "/api/import?date=2026-04-01&template=all",
+                    {"source_type": "rcb"},
+                    ("file", "import_april.csv", "text/csv", content),
+                )
+                self.assertEqual(status, 200)
+                self.assertIn("application/json", content_type)
+                payload = json.loads(body.decode("utf-8"))
+                self.assertGreater(payload["summary"]["records"], 0)
+                self.assertGreater(app.STORE.meta["records"], before)
+                self.assertTrue((app.DATA_UPLOADS_DIR / "rcb" / "import_april.csv").exists())
+            finally:
+                app.DATA_UPLOADS_DIR = original_uploads
+                app.STORE = original_store
 
     def test_object_and_excel_export_endpoints(self):
         query = app.query_as_of({"date": ["2026-04-01"], "template": ["skk"]})
@@ -751,6 +829,7 @@ class StaticFilesTests(unittest.TestCase):
         self.assertIn("/api/readiness", script)
         self.assertIn("/api/object", script)
         self.assertIn("/api/review", script)
+        self.assertIn("/api/import", script)
         self.assertIn("/api/export.xlsx", script)
         self.assertIn("/api/catalog/quick-actions", script)
         self.assertIn("/api/assistant", script)
