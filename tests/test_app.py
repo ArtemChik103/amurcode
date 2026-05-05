@@ -898,6 +898,20 @@ class HttpTests(unittest.TestCase):
         self.assertTrue(filename.endswith(".pdf"))
         self.assertGreater(len(body), 5000)
 
+    def test_pdf_font_candidates_cover_linux_and_registered_font(self):
+        try:
+            import reportlab  # noqa: F401
+        except ImportError:
+            self.skipTest("reportlab is not installed")
+        candidates = app.pdf_font_candidates()
+        candidate_paths = {regular for _, _, regular, _ in candidates}
+        self.assertIn("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", candidate_paths)
+        self.assertIn("C:/Windows/Fonts/arial.ttf", candidate_paths)
+        if any(Path(regular).exists() for _, _, regular, _ in candidates):
+            regular_font, bold_font = app.register_pdf_font()
+            self.assertNotEqual(regular_font, "Helvetica")
+            self.assertNotEqual(bold_font, "Helvetica-Bold")
+
     def test_pdf_export_compare_returns_pdf(self):
         try:
             import reportlab  # noqa: F401

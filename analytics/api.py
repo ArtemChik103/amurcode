@@ -2833,13 +2833,7 @@ def register_pdf_font() -> tuple[str, str]:
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
 
-    # Кириллица надежнее отображается с системным TTF; Helvetica остается fallback.
-    fonts = [
-        ("ArialPdf", "ArialPdfBold", "C:/Windows/Fonts/arial.ttf", "C:/Windows/Fonts/arialbd.ttf"),
-        ("CalibriPdf", "CalibriPdfBold", "C:/Windows/Fonts/calibri.ttf", "C:/Windows/Fonts/calibrib.ttf"),
-        ("TahomaPdf", "TahomaPdfBold", "C:/Windows/Fonts/tahoma.ttf", "C:/Windows/Fonts/tahomabd.ttf"),
-    ]
-    for regular_name, bold_name, regular_path, bold_path in fonts:
+    for regular_name, bold_name, regular_path, bold_path in pdf_font_candidates():
         if not Path(regular_path).exists():
             continue
         try:
@@ -2851,6 +2845,26 @@ def register_pdf_font() -> tuple[str, str]:
         except Exception:
             continue
     return "Helvetica", "Helvetica-Bold"
+
+
+def pdf_font_candidates() -> list[tuple[str, str, str, str]]:
+    """Candidate TTF fonts with Cyrillic glyphs for Windows, Linux hosting and env overrides."""
+    candidates: list[tuple[str, str, str, str]] = []
+    env_regular = os.environ.get("PDF_FONT_REGULAR", "").strip()
+    env_bold = os.environ.get("PDF_FONT_BOLD", "").strip()
+    if env_regular:
+        candidates.append(("EnvPdf", "EnvPdfBold", env_regular, env_bold or env_regular))
+    candidates.extend(
+        [
+            ("DejaVuPdf", "DejaVuPdfBold", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+            ("LiberationPdf", "LiberationPdfBold", "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf", "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"),
+            ("NotoPdf", "NotoPdfBold", "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf", "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf"),
+            ("ArialPdf", "ArialPdfBold", "C:/Windows/Fonts/arial.ttf", "C:/Windows/Fonts/arialbd.ttf"),
+            ("CalibriPdf", "CalibriPdfBold", "C:/Windows/Fonts/calibri.ttf", "C:/Windows/Fonts/calibrib.ttf"),
+            ("TahomaPdf", "TahomaPdfBold", "C:/Windows/Fonts/tahoma.ttf", "C:/Windows/Fonts/tahomabd.ttf"),
+        ]
+    )
+    return candidates
 
 
 def export_pdf(params: dict[str, list[str]]) -> tuple[bytes, str]:
