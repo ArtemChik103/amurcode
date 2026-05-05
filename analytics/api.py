@@ -215,28 +215,40 @@ SNAPSHOT_RE = re.compile(r"на\s+(\d{2}\.\d{2}\.\d{4})")
 MONTHS = {
     "январь": 1,
     "января": 1,
+    "январе": 1,
     "февраль": 2,
     "февраля": 2,
+    "феврале": 2,
     "март": 3,
     "марта": 3,
+    "марте": 3,
     "апрель": 4,
     "апреля": 4,
+    "апреле": 4,
     "май": 5,
     "мая": 5,
+    "мае": 5,
     "июнь": 6,
     "июня": 6,
+    "июне": 6,
     "июль": 7,
     "июля": 7,
+    "июле": 7,
     "август": 8,
     "августа": 8,
+    "августе": 8,
     "сентябрь": 9,
     "сентября": 9,
+    "сентябре": 9,
     "октябрь": 10,
     "октября": 10,
+    "октябре": 10,
     "ноябрь": 11,
     "ноября": 11,
+    "ноябре": 11,
     "декабрь": 12,
     "декабря": 12,
+    "декабре": 12,
 }
 
 
@@ -1699,17 +1711,47 @@ def clean_search_text(message: str) -> str:
     text = re.sub(r"\b20\d{2}-\d{1,2}-\d{1,2}\b", " ", text)
     text = re.sub(rf"\b\d{{1,2}}\s*(?:{month_pattern})\s+20\d{{2}}\b", " ", text, flags=re.I)
     text = re.sub(rf"\b(?:{month_pattern})\s+20\d{{2}}\b", " ", text, flags=re.I)
-    text = re.sub(r"\b(покажи|показать|найди|найти|сравни|сравнить|что|такое|где|есть|по|в|и|с|со|на|за|от|до|между|период|объект\w*|только|выведи|сделай|собери|но|или|либо)\b", " ", text, flags=re.I)
-    text = re.sub(r"\b(скк|кик|окв|бо|бу/?ау|буау|отчет\w*|отчёт\w*|капитал\w*|капвлож\w*|вложени\w*|качеств\w*|лимит\w*|касс\w*|исполн\w*|платеж\w*|оплат\w*|динамик\w*|измен\w*|проблем\w*|разрыв\w*|данн\w*|документ\w*|договор\w*|соглаш\w*|непровер\w*|провер\w*|контроль|загрузк\w*|скач\w*|excel|эксель|pdf|пдф|таблиц\w*)\b", " ", text, flags=re.I)
+    text = re.sub(r"\b(покажи|показать|найди|найти|сравни|сравнить|что|такое|где|есть|по|в|и|с|со|на|за|от|до|между|против|период|объект\w*|только|выведи|сделай|собери|но|или|либо)\b", " ", text, flags=re.I)
+    text = re.sub(r"\b(скк|кик|окв|бо|бу/?ау|буау|отчет\w*|отчёт\w*|капитал\w*|капвлож\w*|вложени\w*|качеств\w*|лимит\w*|касс\w*|исполн\w*|платеж\w*|оплат\w*|динамик\w*|измен\w*|проблем\w*|разрыв\w*|источн\w*|данн\w*|документ\w*|договор\w*|соглаш\w*|непровер\w*|провер\w*|контроль|загрузк\w*|скач\w*|выгруз\w*|excel|эксель|pdf|пдф|таблиц\w*)\b", " ", text, flags=re.I)
     text = re.sub(r"\b(без|нет|низк\w*|нулев\w*)\b", " ", text, flags=re.I)
     text = re.sub(r"\b(6105|978|970|2/3)\b", " ", text)
     return " ".join(text.split())
+
+
+def is_download_request(lower: str) -> bool:
+    return any(
+        word in lower
+        for word in (
+            "скачать",
+            "скачай",
+            "скачайте",
+            "выгрузи",
+            "выгрузить",
+            "экспорт",
+            "excel",
+            "эксель",
+            "pdf",
+            "пдф",
+            "csv",
+        )
+    )
+
+
+def download_type_from_message(lower: str) -> str:
+    if "pdf" in lower or "пдф" in lower:
+        return "pdf"
+    if "csv" in lower or "таблиц" in lower:
+        return "csv"
+    return "excel"
 
 
 def assistant_display_message(intent: str, action: dict) -> str:
     template = TEMPLATES.get(action.get("template"), TEMPLATES["all"])
     if intent == "run_compare" or action.get("mode") == "compare":
         return f"Я понял запрос как сравнение: {template['label']}."
+    if action.get("download"):
+        suffix = f", поиск: {action['q']}" if action.get("q") else ""
+        return f"Я понял запрос как выгрузку: {template['label']}{suffix}."
     if intent == "show_execution_problems" or action.get("post_filter"):
         return f"Я понял запрос как поиск проблем: {template['label']}."
     if intent == "find_object" and action.get("q"):
@@ -1801,13 +1843,8 @@ def assistant_rule_based(message: str, context: dict | None = None) -> dict:
         action["open_view"] = "overview"
         confidence = max(confidence, 0.9)
 
-    if any(word in lower for word in ("скачать", "выгрузи", "выгрузить", "экспорт")):
-        if "pdf" in lower or "пдф" in lower:
-            action["download"] = "pdf"
-        elif "csv" in lower or "таблиц" in lower:
-            action["download"] = "csv"
-        else:
-            action["download"] = "excel"
+    if is_download_request(lower):
+        action["download"] = download_type_from_message(lower)
         if action["download"] == "excel":
             intent = "export_excel"
         confidence = max(confidence, 0.84)
@@ -1817,7 +1854,7 @@ def assistant_rule_based(message: str, context: dict | None = None) -> dict:
         confidence = max(confidence, 0.75)
 
     search_text = clean_search_text(message)
-    if intent in {"run_query", "run_compare", "find_object"} and search_text:
+    if (intent in {"run_query", "run_compare", "find_object", "export_excel"} or action.get("download")) and search_text:
         action["q"] = search_text
         if re.fullmatch(r"\d{4,}", search_text) and search_text not in {"6105", "0970", "970", "0978", "978"}:
             action["code"] = search_text
@@ -1979,8 +2016,8 @@ def apply_message_overrides(message: str, action: dict) -> dict:
     if any(word in lower for word in ("контроль загруз", "проверить загруз", "качество загруз", "качество данных")):
         result["open"] = "control"
         result["open_view"] = "overview"
-    if any(word in lower for word in ("скачать", "выгрузи", "выгрузить", "экспорт")):
-        result["download"] = "pdf" if "pdf" in lower or "пдф" in lower else "csv" if "csv" in lower or "таблиц" in lower else "excel"
+    if is_download_request(lower):
+        result["download"] = download_type_from_message(lower)
 
     result["q"] = clean_search_text(message)
     if re.fullmatch(r"\d{4,}", result["q"]) and result["q"] not in {"6105", "0970", "970", "0978", "978"}:
@@ -1999,6 +2036,10 @@ def normalize_assistant_intent(intent: str, message: str, action: dict, fallback
         return "run_compare"
     if action.get("post_filter"):
         return "show_execution_problems"
+    if intent == "run_compare":
+        if any(word in lower for word in ("сравн", "измен", "динамик", "против")):
+            return "run_compare"
+        return "find_object" if action.get("q") or action.get("code") or action.get("budget") or action.get("source") else "run_query"
     if any(phrase in lower for phrase in ("что такое", "объясни", "расскажи")):
         if intent in {"explain_metric", "explain_template", "explain_result"}:
             return intent

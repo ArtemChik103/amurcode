@@ -65,6 +65,10 @@ class GroqIntegrationTests(unittest.TestCase):
                 "скачать excel по СКК",
                 {"mode": "slice", "template": "skk", "download": "excel", "q": ""},
             ),
+            (
+                "скачай excel по скк по благовещенск в марте 2026",
+                {"mode": "slice", "template": "skk", "date": "2026-03-01", "download": "excel", "q": "благовещенск"},
+            ),
         ]
         for message, expected in cases:
             with self.subTest(message=message):
@@ -94,6 +98,7 @@ class GroqIntegrationTests(unittest.TestCase):
             ("найди Тында", {"mode": "slice", "q": "Тында"}),
             ("скачать pdf по КИК за март 2026", {"mode": "slice", "template": "kik", "date": "2026-03-01", "download": "pdf", "q": ""}),
             ("скачать таблицу по СКК", {"mode": "slice", "template": "skk", "download": "csv", "q": ""}),
+            ("выгрузи эксель по ОКВ в апреле 2026 только Благовещенск", {"mode": "slice", "template": "okv", "date": "2026-04-01", "download": "excel", "q": "Благовещенск"}),
             ("проверить качество данных по СКК", {"mode": "slice", "template": "skk", "open": "control", "q": ""}),
         ]
         for message, expected in cases:

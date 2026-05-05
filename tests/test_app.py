@@ -470,6 +470,13 @@ class DataLoadTests(unittest.TestCase):
         self.assertEqual(compare["action"]["open_view"], "changes")
         self.assertEqual(compare["action"]["q"], "")
 
+        compare_against = app.assistant_rule_based("сравнить КИК март 2025 против марта 2026", {"mode": "slice", "template": "all"})
+        self.assertEqual(compare_against["action"]["mode"], "compare")
+        self.assertEqual(compare_against["action"]["template"], "kik")
+        self.assertEqual(compare_against["action"]["base"], "2025-03-01")
+        self.assertEqual(compare_against["action"]["target"], "2026-03-01")
+        self.assertEqual(compare_against["action"]["q"], "")
+
         no_docs = app.assistant_rule_based("покажи объекты без договоров по ОКВ", {"mode": "slice", "template": "all"})
         self.assertEqual(no_docs["action"]["template"], "okv")
         self.assertEqual(no_docs["action"]["post_filter"], "no_documents")
@@ -487,6 +494,25 @@ class DataLoadTests(unittest.TestCase):
         self.assertEqual(export["intent"], "export_excel")
         self.assertEqual(export["action"]["download"], "excel")
         self.assertEqual(export["action"]["q"], "")
+
+        city_export = app.assistant_rule_based(
+            "скачай excel по скк по благовещенск в марте 2026",
+            {"mode": "slice", "template": "all", "date": "2026-04-01"},
+        )
+        self.assertEqual(city_export["intent"], "export_excel")
+        self.assertEqual(city_export["action"]["template"], "skk")
+        self.assertEqual(city_export["action"]["date"], "2026-03-01")
+        self.assertEqual(city_export["action"]["download"], "excel")
+        self.assertEqual(city_export["action"]["q"], "благовещенск")
+
+        city_export_imperative = app.assistant_rule_based(
+            "выгрузи эксель по ОКВ в апреле 2026 только Благовещенск",
+            {"mode": "slice", "template": "all", "date": "2026-04-01"},
+        )
+        self.assertEqual(city_export_imperative["action"]["template"], "okv")
+        self.assertEqual(city_export_imperative["action"]["date"], "2026-04-01")
+        self.assertEqual(city_export_imperative["action"]["download"], "excel")
+        self.assertEqual(city_export_imperative["action"]["q"], "Благовещенск")
 
     def test_assistant_explain_message_is_short_and_human(self):
         payload = app.assistant_rule_based("что такое скк", {"mode": "slice", "template": "all"})
@@ -532,6 +558,48 @@ class DataLoadTests(unittest.TestCase):
         self.assertEqual(action["date"], "2025-03-01")
         self.assertEqual(action["q"], "благовещенск")
         self.assertEqual(action["open_view"], "overview")
+
+    def test_assistant_message_overrides_fix_download_date_query(self):
+        message = "скачай excel по скк по благовещенск в марте 2026"
+        fallback = app.assistant_rule_based(message, {"mode": "slice", "template": "all", "date": "2026-04-01"})["action"]
+        dirty = {
+            "mode": "slice",
+            "template": "skk",
+            "date": "2026-04-01",
+            "q": "благовещенск марте 2026",
+            "metrics": ["limit", "obligation"],
+            "open_view": "overview",
+        }
+        action = app.validate_assistant_action(app.apply_message_overrides(message, dirty), fallback)
+        intent = app.normalize_assistant_intent("find_object", message, action, "run_query")
+        self.assertEqual(intent, "export_excel")
+        self.assertEqual(action["mode"], "slice")
+        self.assertEqual(action["template"], "skk")
+        self.assertEqual(action["date"], "2026-03-01")
+        self.assertEqual(action["download"], "excel")
+        self.assertEqual(action["q"], "благовещенск")
+
+    def test_assistant_message_overrides_clean_problem_source_words(self):
+        message = "разрывы между источниками по СКК"
+        fallback = app.assistant_rule_based(message, {"mode": "slice", "template": "all", "date": "2026-04-01"})["action"]
+        dirty = {
+            "mode": "slice",
+            "template": "skk",
+            "q": "источниками",
+            "post_filter": "data_gap",
+            "open_view": "problems",
+        }
+        action = app.validate_assistant_action(app.apply_message_overrides(message, dirty), fallback)
+        intent = app.normalize_assistant_intent("run_compare", message, action, "run_query")
+        self.assertEqual(intent, "show_execution_problems")
+        self.assertEqual(action["post_filter"], "data_gap")
+        self.assertEqual(action["q"], "")
+
+    def test_assistant_normalizes_spurious_compare_intent_for_slice(self):
+        message = "покажи СКК в марте 2026"
+        action = app.assistant_rule_based(message, {"mode": "slice", "template": "all"})["action"]
+        intent = app.normalize_assistant_intent("run_compare", message, action, "run_query")
+        self.assertEqual(intent, "run_query")
 
     def test_malformed_llm_response_falls_back_rule_based(self):
         old_key = os.environ.get("GROQ_API_KEY")
