@@ -55,6 +55,11 @@ class DataLoadTests(unittest.TestCase):
     def setUpClass(cls):
         cls.store = app.STORE
 
+    def test_fastapi_app_is_importable(self):
+        from analytics.api import app as fastapi_app
+
+        self.assertIsNotNone(fastapi_app)
+
     def test_loads_expected_dataset_volume_and_sources(self):
         self.assertEqual(self.store.meta["records"], 4037)
         self.assertEqual(

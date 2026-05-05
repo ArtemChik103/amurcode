@@ -22,7 +22,11 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+from urllib.request import Request as UrlRequest, urlopen
+
+from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -60,6 +64,9 @@ def load_local_env(path: Path = ROOT / ".env") -> None:
 
 
 load_local_env()
+
+app = FastAPI(title="Expense Analytics")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 # Метрики хранятся в едином порядке, чтобы backend, UI и Excel одинаково
 # трактовали выбранные суммы.
@@ -458,6 +465,28 @@ def json_safe(value: object) -> object:
     if isinstance(value, tuple):
         return [json_safe(item) for item in value]
     return value
+
+
+def request_params(request: Request) -> dict[str, list[str]]:
+    params: dict[str, list[str]] = {}
+    for key, value in request.query_params.multi_items():
+        params.setdefault(key, []).append(value)
+    return params
+
+
+def fastapi_json(payload: object, status_code: int = 200) -> JSONResponse:
+    return JSONResponse(content=json_safe(payload), status_code=status_code)
+
+
+def fastapi_binary(body: bytes, content_type: str, filename: str) -> Response:
+    return Response(
+        content=body,
+        media_type=content_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 def parse_amount(value: object, source_file: str = "", source_row: int | str = "", field: str = "") -> float:
@@ -1825,7 +1854,7 @@ def groq_chat_completion(model: str, api_key: str, messages: list[dict], respons
         },
         ensure_ascii=False,
     ).encode("utf-8")
-    request = Request(
+    request = UrlRequest(
         "https://api.groq.com/openai/v1/chat/completions",
         data=body,
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -3159,13 +3188,225 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
 
+async def fastapi_json_body(request: Request) -> dict | None:
+    body = await request.body()
+    if not body.strip():
+        return {}
+    payload = json.loads(body.decode("utf-8"))
+    return payload if isinstance(payload, dict) else {}
+
+
+@app.get("/")
+def fastapi_index():
+    return FileResponse(STATIC_DIR / "index.html", media_type="text/html")
+
+
+@app.get("/api/meta")
+def fastapi_meta():
+    return fastapi_json(STORE.meta)
+
+
+@app.get("/api/query")
+def fastapi_query(request: Request):
+    params = request_params(request)
+    metrics = selected_metrics(params)
+    if params.get("view", ["period"])[0].strip() == "as_of":
+        return fastapi_json(query_as_of(params))
+    filtered = apply_filters(STORE.records, params)
+    result = aggregate(filtered, metrics)
+    post_filter = params.get("post_filter", [""])[0].strip()
+    return fastapi_json(apply_aggregate_post_filter(result, post_filter, metrics))
+
+
+@app.get("/api/compare")
+def fastapi_compare(request: Request):
+    return fastapi_json(compare_periods(request_params(request)))
+
+
+@app.get("/api/readiness")
+def fastapi_readiness(request: Request):
+    return fastapi_json(readiness_response(request_params(request)))
+
+
+@app.get("/api/control")
+def fastapi_control(request: Request):
+    return fastapi_json(control_summary(request_params(request)))
+
+
+@app.get("/api/reviews")
+def fastapi_reviews():
+    return fastapi_json(reviews_payload())
+
+
+@app.get("/api/review")
+def fastapi_review_get(request: Request):
+    object_key = request_params(request).get("object_key", [""])[0].strip()
+    if not object_key:
+        return fastapi_json({"error": "object_key_required"}, status_code=400)
+    return fastapi_json(review_for_object(object_key))
+
+
+@app.get("/api/object")
+def fastapi_object(request: Request):
+    payload = object_detail(request_params(request))
+    status_code = 404 if payload.get("error") == "object_not_found" else 400 if payload.get("error") else 200
+    return fastapi_json(payload, status_code=status_code)
+
+
+@app.get("/api/export.xlsx")
+def fastapi_export_xlsx(request: Request):
+    try:
+        body, filename = export_excel(request_params(request))
+    except RuntimeError as exc:
+        if str(exc) == "excel_dependency_missing":
+            return fastapi_json({"error": "excel_dependency_missing"}, status_code=500)
+        raise
+    return fastapi_binary(body, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename)
+
+
+@app.get("/api/export.pdf")
+def fastapi_export_pdf(request: Request):
+    try:
+        body, filename = export_pdf(request_params(request))
+    except RuntimeError as exc:
+        if str(exc) == "pdf_dependency_missing":
+            return fastapi_json({"error": "pdf_dependency_missing"}, status_code=500)
+        raise
+    return fastapi_binary(body, "application/pdf", filename)
+
+
+@app.get("/api/quality")
+def fastapi_quality():
+    return fastapi_json({"issues": QUALITY_ISSUES, "summary": quality_summary(), "load_stats": LOAD_STATS})
+
+
+@app.get("/api/trace")
+def fastapi_trace(request: Request):
+    record_id = request_params(request).get("id", [""])[0]
+    payload = trace_record(record_id)
+    if payload is None:
+        return fastapi_json({"error": "record_not_found"}, status_code=404)
+    return fastapi_json(payload)
+
+
+@app.get("/api/catalog/dates")
+def fastapi_catalog_dates():
+    return fastapi_json(STORE.meta["snapshots"])
+
+
+@app.get("/api/catalog/reporting-dates")
+def fastapi_catalog_reporting_dates():
+    return fastapi_json(reporting_dates_payload())
+
+
+@app.get("/api/catalog/sources")
+def fastapi_catalog_sources():
+    return fastapi_json(STORE.meta["sources"])
+
+
+@app.get("/api/catalog/budgets")
+def fastapi_catalog_budgets():
+    return fastapi_json(STORE.meta["budgets"])
+
+
+@app.get("/api/catalog/templates")
+def fastapi_catalog_templates():
+    return fastapi_json([{"code": code, "label": item["label"], "description": item["description"]} for code, item in TEMPLATES.items()])
+
+
+@app.get("/api/catalog/metrics")
+def fastapi_catalog_metrics():
+    return fastapi_json([{"code": code, "label": label} for code, label in METRICS.items()])
+
+
+@app.get("/api/catalog/quick-actions")
+def fastapi_catalog_quick_actions():
+    return fastapi_json(quick_actions_payload())
+
+
+@app.get("/api/catalog/objects")
+def fastapi_catalog_objects(request: Request):
+    return fastapi_json(catalog_objects(STORE.records, request_params(request)))
+
+
+@app.post("/api/review")
+async def fastapi_review_post(request: Request):
+    try:
+        payload = await fastapi_json_body(request)
+        object_key = str(payload.get("object_key") or "").strip()
+        result = update_review(object_key, payload)
+        return fastapi_json(result, status_code=400 if result.get("error") else 200)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return fastapi_json({"error": "invalid_json"}, status_code=400)
+
+
+@app.post("/api/assistant")
+async def fastapi_assistant(request: Request):
+    try:
+        payload = await fastapi_json_body(request)
+        message = str(payload.get("message") or "").strip()
+        context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+        if not message:
+            return fastapi_json({"error": "message_required"}, status_code=400)
+        return fastapi_json(assistant_response(message, context))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return fastapi_json({"error": "invalid_json"}, status_code=400)
+
+
+@app.post("/api/explain")
+async def fastapi_explain(request: Request):
+    try:
+        payload = await fastapi_json_body(request)
+        kind = str(payload.get("kind") or "query")
+        data = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+        return fastapi_json(explain_response(kind, data))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return fastapi_json({"error": "invalid_json"}, status_code=400)
+
+
+@app.post("/api/import")
+async def fastapi_import(
+    request: Request,
+    source_type: str = Form(""),
+    file: UploadFile | None = File(None),
+):
+    global STORE
+    source_type = str(source_type or "").strip()
+    if source_type not in IMPORT_SOURCE_TYPES:
+        return fastapi_json({"error": "source_type_required"}, status_code=400)
+    if file is None or not file.filename:
+        return fastapi_json({"error": "file_required"}, status_code=400)
+    filename = sanitize_upload_filename(file.filename)
+    extension = Path(filename).suffix.lower()
+    if extension not in {".csv", ".xlsx"}:
+        return fastapi_json({"error": "invalid_extension"}, status_code=400)
+    content = await file.read()
+    if len(content) > IMPORT_MAX_BYTES:
+        return fastapi_json({"error": "file_too_large"}, status_code=400)
+    target = save_import_upload(source_type, filename, content)
+    try:
+        STORE = load_data()
+    except Exception:
+        add_quality_issue(
+            relative_source(target),
+            "",
+            "error",
+            "import_parse_failed",
+            "Не удалось разобрать импортированный файл",
+            "file",
+            filename,
+        )
+    return fastapi_json(import_payload(request_params(request)))
+
+
 def main() -> None:
     port = int(os.environ.get("PORT") or (sys.argv[1] if len(sys.argv) > 1 else 8000))
     host = os.environ.get("HOST", "0.0.0.0")
-    server = ThreadingHTTPServer((host, port), Handler)
+    import uvicorn
+
     print(f"Loaded {STORE.meta['records']} records from {DATA_DIR}")
     print(f"Open http://{host}:{port}")
-    server.serve_forever()
+    uvicorn.run(app, host=host, port=port)
 
 
 if __name__ == "__main__":

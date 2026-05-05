@@ -1,2 +1,5 @@
 openpyxl
 reportlab
+fastapi
+uvicorn
+python-multipart
