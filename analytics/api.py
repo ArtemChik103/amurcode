@@ -8,7 +8,6 @@ HTTP API и экспорт Excel. Данные держатся в памяти,
 from __future__ import annotations
 
 import csv
-import cgi
 import json
 import os
 import re
@@ -18,6 +17,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from email.parser import BytesParser
+from email.policy import default as email_policy
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -309,6 +310,30 @@ def raw_rows(path: Path, delimiter: str = ";") -> list[list[str]]:
 def sanitize_upload_filename(filename: str) -> str:
     name = Path(filename or "upload").name
     return re.sub(r"[^0-9A-Za-zА-Яа-яЁё._-]+", "_", name).strip("._") or "upload"
+
+
+def parse_legacy_multipart(content_type: str, body: bytes) -> tuple[dict[str, str], dict[str, dict[str, object]]]:
+    if "multipart/form-data" not in content_type.lower() or "boundary=" not in content_type:
+        return {}, {}
+    header = f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("utf-8")
+    message = BytesParser(policy=email_policy).parsebytes(header + body)
+    fields: dict[str, str] = {}
+    files: dict[str, dict[str, object]] = {}
+    if not message.is_multipart():
+        return fields, files
+    for part in message.iter_parts():
+        if part.get_content_disposition() != "form-data":
+            continue
+        name = part.get_param("name", header="content-disposition")
+        if not name:
+            continue
+        payload = part.get_payload(decode=True) or b""
+        filename = part.get_filename()
+        if filename:
+            files[name] = {"filename": filename, "content": payload}
+        else:
+            fields[name] = payload.decode(part.get_content_charset() or "utf-8", errors="replace")
+    return fields, files
 
 
 def unique_upload_path(source_type: str, filename: str) -> Path:
@@ -3332,29 +3357,22 @@ class Handler(SimpleHTTPRequestHandler):
         if length > IMPORT_MAX_BYTES:
             self.write_json({"error": "file_too_large"}, status=400)
             return
-        form = cgi.FieldStorage(
-            fp=self.rfile,
-            headers=self.headers,
-            environ={
-                "REQUEST_METHOD": "POST",
-                "CONTENT_TYPE": self.headers.get("Content-Type", ""),
-                "CONTENT_LENGTH": str(length),
-            },
-        )
-        source_type = str(form.getfirst("source_type") or "").strip()
+        body = self.rfile.read(length)
+        fields, files = parse_legacy_multipart(self.headers.get("Content-Type", ""), body)
+        source_type = str(fields.get("source_type") or "").strip()
         if source_type not in IMPORT_SOURCE_TYPES:
             self.write_json({"error": "source_type_required"}, status=400)
             return
-        file_item = form["file"] if "file" in form else None
-        if file_item is None or not getattr(file_item, "filename", ""):
+        file_item = files.get("file")
+        if file_item is None or not file_item.get("filename"):
             self.write_json({"error": "file_required"}, status=400)
             return
-        filename = sanitize_upload_filename(file_item.filename)
+        filename = sanitize_upload_filename(str(file_item["filename"]))
         extension = Path(filename).suffix.lower()
         if extension not in {".csv", ".xlsx"}:
             self.write_json({"error": "invalid_extension"}, status=400)
             return
-        content = file_item.file.read()
+        content = bytes(file_item.get("content") or b"")
         if len(content) > IMPORT_MAX_BYTES:
             self.write_json({"error": "file_too_large"}, status=400)
             return
