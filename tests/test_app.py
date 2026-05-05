@@ -506,6 +506,25 @@ class DataLoadTests(unittest.TestCase):
         self.assertEqual(action["q"], "")
         self.assertEqual(action["open_view"], "changes")
 
+    def test_assistant_message_overrides_fix_object_date_query(self):
+        message = "скк благовещенск март 2025"
+        fallback = app.assistant_rule_based(message, {"mode": "slice", "template": "all", "date": "2026-04-01"})["action"]
+        dirty = {
+            "mode": "compare",
+            "template": "all",
+            "date": "2026-04-01",
+            "q": "благовещенск март 2025",
+            "open_view": "changes",
+        }
+        action = app.validate_assistant_action(app.apply_message_overrides(message, dirty), fallback)
+        intent = app.normalize_assistant_intent("run_compare", message, action, "run_query")
+        self.assertEqual(intent, "find_object")
+        self.assertEqual(action["mode"], "slice")
+        self.assertEqual(action["template"], "skk")
+        self.assertEqual(action["date"], "2025-03-01")
+        self.assertEqual(action["q"], "благовещенск")
+        self.assertEqual(action["open_view"], "overview")
+
     def test_malformed_llm_response_falls_back_rule_based(self):
         old_key = os.environ.get("GROQ_API_KEY")
         original = app.assistant_llm

@@ -1908,6 +1908,8 @@ def apply_message_overrides(message: str, action: dict) -> dict:
     elif dates:
         result["mode"] = "slice"
         result["date"] = dates[-1]
+        if result.get("open_view") == "changes":
+            result["open_view"] = "overview"
 
     if any(word in lower for word in ("проблем", "нет касс", "без касс", "низк", "нет оплат", "нет платеж", "без оплат", "без платеж", "нет документ", "без документ", "нет договор", "без договор", "нет соглаш", "без соглаш", "непровер", "разрыв")):
         result["open_view"] = "problems"
@@ -1942,6 +1944,28 @@ def apply_message_overrides(message: str, action: dict) -> dict:
     if re.fullmatch(r"\d{4,}", result["q"]) and result["q"] not in {"6105", "0970", "970", "0978", "978"}:
         result["code"] = result["q"]
     return result
+
+
+def normalize_assistant_intent(intent: str, message: str, action: dict, fallback_intent: str) -> str:
+    """Keeps intent consistent with the final action applied by the UI."""
+    lower = message.lower()
+    if action.get("download") == "excel":
+        return "export_excel"
+    if action.get("open") == "control":
+        return "help"
+    if action.get("mode") == "compare":
+        return "run_compare"
+    if action.get("post_filter"):
+        return "show_execution_problems"
+    if any(phrase in lower for phrase in ("что такое", "объясни", "расскажи")):
+        if intent in {"explain_metric", "explain_template", "explain_result"}:
+            return intent
+        return fallback_intent if fallback_intent in ASSISTANT_INTENTS else "explain_template"
+    if action.get("q") or action.get("code") or action.get("budget") or action.get("source"):
+        return "find_object"
+    if intent in ASSISTANT_INTENTS:
+        return intent
+    return fallback_intent if fallback_intent in ASSISTANT_INTENTS else "run_query"
 
 
 def assistant_json_schema() -> dict:
@@ -2084,9 +2108,9 @@ def assistant_llm(message: str, context: dict, rag_context: str) -> dict:
         except Exception:
             parsed = groq_chat_completion(model, api_key, messages, {"type": "json_object"})
     fallback = assistant_rule_based(message, context)
-    intent = parsed.get("intent") if parsed.get("intent") in ASSISTANT_INTENTS else fallback["intent"]
     action = validate_assistant_action(parsed.get("action", {}), fallback["action"])
     action = validate_assistant_action(apply_message_overrides(message, action), fallback["action"])
+    intent = normalize_assistant_intent(str(parsed.get("intent") or ""), message, action, fallback["intent"])
     followups = validate_assistant_followups(parsed.get("followups")) or fallback.get("followups", [])
     response_message = str(parsed.get("message") or fallback["message"])[:1000]
     if "Я понял запрос" not in response_message:
@@ -2108,12 +2132,19 @@ def assistant_response(message: str, context: dict | None = None) -> dict:
     context = context or {}
     fallback = assistant_rule_based(message, context)
     if os.environ.get("ASSISTANT_ENABLED", "auto").lower() == "false":
+        fallback["fallback_reason"] = "assistant_disabled"
         return fallback
     if not os.environ.get("GROQ_API_KEY", "").strip():
+        fallback["fallback_reason"] = "missing_groq_key"
         return fallback
     try:
         return assistant_llm(message, context, fallback.get("rag_context", ""))
-    except Exception:
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else "unknown"
+        fallback["fallback_reason"] = f"groq_http_{status}"
+        return fallback
+    except Exception as exc:
+        fallback["fallback_reason"] = exc.__class__.__name__
         return fallback
 
 

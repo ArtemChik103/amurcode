@@ -89,6 +89,7 @@ class GroqIntegrationTests(unittest.TestCase):
             ("покажи капитальные вложения", {"mode": "slice", "template": "okv", "q": ""}),
             ("покажи только лимиты и БО по 970", {"mode": "slice", "template": "two_thirds", "metrics": ["limit", "obligation"], "q": ""}),
             ("покажи платежи БУАУ по ОКВ", {"mode": "slice", "template": "okv", "metrics": ["cash", "payment", "buau"], "q": ""}),
+            ("скк благовещенск март 2025", {"mode": "slice", "template": "skk", "date": "2025-03-01", "q": "благовещенск"}),
             ("найди Благовещенск 6105 на 01.04.2026", {"mode": "slice", "template": "skk", "date": "2026-04-01", "q": "Благовещенск"}),
             ("найди Тында", {"mode": "slice", "q": "Тында"}),
             ("скачать pdf по КИК за март 2026", {"mode": "slice", "template": "kik", "date": "2026-03-01", "download": "pdf", "q": ""}),

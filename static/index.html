@@ -175,7 +175,7 @@
           </button>
           <div class="examples">Примеры: проблемные СКК · сравнить СКК · 970 Свободный · где нет кассы</div>
           <div v-if="command.response" class="command-status">
-            {{ command.response.mode === 'llm' ? 'Запрос разобран помощником' : 'Запрос разобран по правилам' }}
+            {{ command.response.mode === 'llm' ? 'Запрос разобран помощником' : command.response.fallback_reason === 'assistant_disabled' ? 'Запрос разобран по правилам: LLM выключен' : command.response.fallback_reason === 'missing_groq_key' ? 'Запрос разобран по правилам: нет ключа Groq' : command.response.fallback_reason ? 'Запрос разобран по правилам: LLM не ответил' : 'Запрос разобран по правилам' }}
           </div>
           <div v-if="command.error" class="command-status danger">{{ command.error }}</div>
           <div v-if="command.response && command.response.message" class="command-message">{{ command.response.message }}</div>
