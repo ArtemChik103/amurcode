@@ -1706,6 +1706,26 @@ def clean_search_text(message: str) -> str:
     return " ".join(text.split())
 
 
+def assistant_display_message(intent: str, action: dict) -> str:
+    template = TEMPLATES.get(action.get("template"), TEMPLATES["all"])
+    if intent == "run_compare" or action.get("mode") == "compare":
+        return f"Я понял запрос как сравнение: {template['label']}."
+    if intent == "show_execution_problems" or action.get("post_filter"):
+        return f"Я понял запрос как поиск проблем: {template['label']}."
+    if intent == "find_object" and action.get("q"):
+        return f"Я понял запрос как поиск: {action['q']}."
+    if intent.startswith("explain"):
+        explanations = {
+            "skk": "СКК — специальные казначейские кредиты. В этой витрине они определяются по КЦСР 6105.",
+            "kik": "КИК — инфраструктурные кредиты. В этой витрине они определяются по кодам КЦСР 975/978.",
+            "two_thirds": "2/3 — высвобождаемые средства. В этой витрине они определяются по КЦСР 970.",
+            "okv": "ОКВ — объекты капитальных вложений. В этой витрине они определяются по капитальным КВР и ДопКР.",
+            "all": "Это общий поиск по данным: бюджеты, источники, объекты, документы и суммы.",
+        }
+        return explanations.get(action.get("template"), explanations["all"])
+    return f"Я понял запрос как выборку: {template['label']}."
+
+
 def assistant_rule_based(message: str, context: dict | None = None) -> dict:
     """Детерминированный парсер пользовательского вопроса без внешнего LLM."""
     context = context or {}
@@ -1803,9 +1823,6 @@ def assistant_rule_based(message: str, context: dict | None = None) -> dict:
             action["code"] = search_text
 
     rag_context = retrieve_rag_context(message, limit=2)
-    explanation = ""
-    if intent.startswith("explain") and rag_context:
-        explanation = " " + " ".join(rag_context.split())[:700]
 
     alternative_label = "Искать во всех данных" if search_text else "Показать все данные"
     followups = [
@@ -1834,7 +1851,7 @@ def assistant_rule_based(message: str, context: dict | None = None) -> dict:
         "mode": "rule_based",
         "intent": intent,
         "confidence": confidence,
-        "message": f"Я понял запрос как {'сравнение' if intent == 'run_compare' else 'выборку'}: {TEMPLATES.get(action['template'], TEMPLATES['all'])['label']}.{explanation}",
+        "message": assistant_display_message(intent, action),
         "action": action,
         "followups": followups,
         "alternatives": alternatives,
@@ -2137,9 +2154,7 @@ def assistant_llm(message: str, context: dict, rag_context: str) -> dict:
     action = validate_assistant_action(apply_message_overrides(message, action), fallback["action"])
     intent = normalize_assistant_intent(str(parsed.get("intent") or ""), message, action, fallback["intent"])
     followups = validate_assistant_followups(parsed.get("followups")) or fallback.get("followups", [])
-    response_message = str(parsed.get("message") or fallback["message"])[:1000]
-    if "Я понял запрос" not in response_message:
-        response_message = fallback["message"]
+    response_message = assistant_display_message(intent, action)
     return {
         "mode": "llm",
         "intent": intent,

@@ -577,7 +577,7 @@ label span,
 .command-message {
   margin-top: 8px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .command-status.danger {
@@ -586,6 +586,9 @@ label span,
 
 .command-message {
   color: var(--text);
+  max-width: 960px;
+  font-size: 15px;
+  line-height: 1.45;
 }
 
 .suggestions {

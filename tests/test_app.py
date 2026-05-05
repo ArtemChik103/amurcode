@@ -488,6 +488,14 @@ class DataLoadTests(unittest.TestCase):
         self.assertEqual(export["action"]["download"], "excel")
         self.assertEqual(export["action"]["q"], "")
 
+    def test_assistant_explain_message_is_short_and_human(self):
+        payload = app.assistant_rule_based("что такое скк", {"mode": "slice", "template": "all"})
+        self.assertEqual(payload["intent"], "explain_template")
+        self.assertIn("СКК", payload["message"])
+        self.assertNotIn("docs/rag", payload["message"])
+        self.assertNotIn("Пользователь", payload["message"])
+        self.assertLess(len(payload["message"]), 180)
+
     def test_assistant_message_overrides_clean_bad_llm_like_action(self):
         fallback = app.assistant_rule_based("сравни СКК февраль 2025 и апрель 2026", {})["action"]
         dirty = {
