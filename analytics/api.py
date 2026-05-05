@@ -24,6 +24,7 @@ from urllib.parse import parse_qs, urlparse
 from urllib.error import HTTPError
 from urllib.request import Request as UrlRequest, urlopen
 
+import requests
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -192,6 +193,8 @@ ASSISTANT_ACTION_FIELDS = {
     "date",
     "base",
     "target",
+    "open",
+    "download",
     "q",
     "code",
     "budget",
@@ -203,22 +206,36 @@ ASSISTANT_ACTION_FIELDS = {
 }
 ASSISTANT_FOLLOWUP_FIELDS = {"label", "action"}
 ASSISTANT_FOLLOWUP_ACTION_FIELDS = {"open", "download", "post_filter", "open_view"}
+ASSISTANT_OPEN_ACTIONS = {"", "top_risk", "control"}
+ASSISTANT_DOWNLOAD_ACTIONS = {"", "excel", "pdf", "csv"}
 CAPITAL_KVR = {"400", "410", "411", "412", "413", "414", "415", "416", "417"}
 
 SNAPSHOT_RE = re.compile(r"на\s+(\d{2}\.\d{2}\.\d{4})")
 MONTHS = {
     "январь": 1,
+    "января": 1,
     "февраль": 2,
+    "февраля": 2,
     "март": 3,
+    "марта": 3,
     "апрель": 4,
+    "апреля": 4,
     "май": 5,
+    "мая": 5,
     "июнь": 6,
+    "июня": 6,
     "июль": 7,
+    "июля": 7,
     "август": 8,
+    "августа": 8,
     "сентябрь": 9,
+    "сентября": 9,
     "октябрь": 10,
+    "октября": 10,
     "ноябрь": 11,
+    "ноября": 11,
     "декабрь": 12,
+    "декабря": 12,
 }
 
 
@@ -1609,9 +1626,57 @@ def retrieve_rag_context(message: str, limit: int = 4) -> str:
     return "\n\n".join(f"[{item['source_file']}]\n{item['content']}" for item in selected)
 
 
+def closest_reporting_date(date: str, dates: list[str] | None = None) -> str:
+    """Возвращает доступную отчетную дату: точную или ближайшую не позже запроса."""
+    available = dates or (STORE.meta.get("reporting_dates", []) if "STORE" in globals() else [])
+    if not date or not available:
+        return ""
+    if date in available:
+        return date
+    earlier = [item for item in available if item <= date]
+    return earlier[-1] if earlier else available[0]
+
+
+def extract_assistant_dates(message: str, dates: list[str] | None = None) -> list[str]:
+    """Достает даты из обычной русской фразы и приводит их к reporting dates."""
+    available = dates or (STORE.meta.get("reporting_dates", []) if "STORE" in globals() else [])
+    candidates: list[tuple[int, str]] = []
+
+    for match in re.finditer(r"\b(\d{1,2})[.](\d{1,2})[.](20\d{2})\b", message):
+        day, month, year = match.groups()
+        normalized = f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
+        candidates.append((match.start(), normalized))
+
+    for match in re.finditer(r"\b(20\d{2})-(\d{1,2})-(\d{1,2})\b", message):
+        year, month, day = match.groups()
+        normalized = f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
+        candidates.append((match.start(), normalized))
+
+    month_pattern = "|".join(sorted((re.escape(name) for name in MONTHS), key=len, reverse=True))
+    for match in re.finditer(rf"\b(\d{{1,2}})?\s*({month_pattern})\s+(20\d{{2}})\b", message.lower()):
+        day, month_name, year = match.groups()
+        normalized = f"{int(year):04d}-{MONTHS[month_name]:02d}-{int(day or 1):02d}"
+        candidates.append((match.start(), normalized))
+
+    result: list[str] = []
+    seen = set()
+    for _, raw_date in sorted(candidates, key=lambda item: item[0]):
+        normalized = closest_reporting_date(raw_date, available)
+        if normalized and normalized not in seen:
+            result.append(normalized)
+            seen.add(normalized)
+    return result
+
+
 def clean_search_text(message: str) -> str:
-    text = re.sub(r"\b(покажи|показать|найди|найти|сравни|сравнить|что|такое|где|есть|по|в|и|с|со)\b", " ", message, flags=re.I)
-    text = re.sub(r"\b(скк|кик|окв|лимит\w*|касс\w*|исполн\w*|платеж\w*|оплат\w*|динамик\w*|измен\w*)\b", " ", text, flags=re.I)
+    month_pattern = "|".join(sorted((re.escape(name) for name in MONTHS), key=len, reverse=True))
+    text = re.sub(r"\b\d{1,2}[.]\d{1,2}[.]20\d{2}\b", " ", message)
+    text = re.sub(r"\b20\d{2}-\d{1,2}-\d{1,2}\b", " ", text)
+    text = re.sub(rf"\b\d{{1,2}}\s*(?:{month_pattern})\s+20\d{{2}}\b", " ", text, flags=re.I)
+    text = re.sub(rf"\b(?:{month_pattern})\s+20\d{{2}}\b", " ", text, flags=re.I)
+    text = re.sub(r"\b(покажи|показать|найди|найти|сравни|сравнить|что|такое|где|есть|по|в|и|с|со|на|за|от|до|между|период|объект\w*|только|выведи|сделай|собери|но|или|либо)\b", " ", text, flags=re.I)
+    text = re.sub(r"\b(скк|кик|окв|бо|бу/?ау|буау|отчет\w*|отчёт\w*|капитал\w*|капвлож\w*|вложени\w*|качеств\w*|лимит\w*|касс\w*|исполн\w*|платеж\w*|оплат\w*|динамик\w*|измен\w*|проблем\w*|разрыв\w*|данн\w*|документ\w*|договор\w*|соглаш\w*|непровер\w*|провер\w*|контроль|загрузк\w*|скач\w*|excel|эксель|pdf|пдф|таблиц\w*)\b", " ", text, flags=re.I)
+    text = re.sub(r"\b(без|нет|низк\w*|нулев\w*)\b", " ", text, flags=re.I)
     text = re.sub(r"\b(6105|978|970|2/3)\b", " ", text)
     return " ".join(text.split())
 
@@ -1621,6 +1686,7 @@ def assistant_rule_based(message: str, context: dict | None = None) -> dict:
     context = context or {}
     lower = message.lower()
     start, end = default_date_range()
+    parsed_dates = extract_assistant_dates(message)
     action = {
         "mode": context.get("mode") or "slice",
         "template": context.get("template") or "all",
@@ -1628,14 +1694,13 @@ def assistant_rule_based(message: str, context: dict | None = None) -> dict:
         "code": "",
         "budget": "",
         "source": "",
-        "date": context.get("date") or end,
-        "start": start,
-        "end": end,
+        "date": parsed_dates[-1] if parsed_dates else context.get("date") or end,
         "metrics": context.get("selected_metrics") or ["limit", "obligation", "cash"],
         "open_view": "overview",
     }
     intent = "run_query"
     confidence = 0.62
+    full_metrics = ["limit", "obligation", "cash", "agreement", "contract", "payment", "buau"]
 
     if "скк" in lower or "6105" in lower:
         action["template"] = "skk"
@@ -1653,34 +1718,54 @@ def assistant_rule_based(message: str, context: dict | None = None) -> dict:
     if any(word in lower for word in ("сравн", "измен", "динамик")):
         intent = "run_compare"
         action["mode"] = "compare"
-        action["base"] = start
-        action["target"] = end
+        action["base"] = parsed_dates[0] if len(parsed_dates) >= 1 else start
+        action["target"] = parsed_dates[1] if len(parsed_dates) >= 2 else parsed_dates[0] if len(parsed_dates) == 1 else end
+        action["open_view"] = "changes"
         confidence = max(confidence, 0.82)
 
     if any(word in lower for word in ("касс", "исполн", "платеж", "оплат")):
         action["metrics"] = ["cash", "payment", "buau"]
     if any(word in lower for word in ("лимит", "план", "бо")):
         action["metrics"] = ["limit", "obligation"]
-    if any(word in lower for word in ("проблем", "нет касс", "низк")):
+    if any(word in lower for word in ("проблем", "нет касс", "без касс", "низк", "нет оплат", "нет платеж", "без оплат", "без платеж", "нет документ", "без документ", "нет договор", "без договор", "нет соглаш", "без соглаш", "непровер", "разрыв")):
         intent = "show_execution_problems"
         if action["template"] == "all" and context.get("template") in TEMPLATES:
             action["template"] = context.get("template") or "all"
-        action["metrics"] = ["limit", "cash", "payment", "buau"]
+        action["metrics"] = full_metrics
         action["post_filter"] = "execution_problems"
         action["open_view"] = "problems"
-    if "нет касс" in lower:
+    if "нет касс" in lower or "без касс" in lower or "нулев" in lower and "касс" in lower:
         action["post_filter"] = "no_cash"
-    if "нет оплат" in lower or "нет платеж" in lower:
+    if "нет оплат" in lower or "нет платеж" in lower or "без оплат" in lower or "без платеж" in lower:
         action["post_filter"] = "no_payments"
-    if "нет документ" in lower or "нет договор" in lower or "нет соглаш" in lower:
+    if "нет документ" in lower or "без документ" in lower or "нет договор" in lower or "без договор" in lower or "нет соглаш" in lower or "без соглаш" in lower:
         action["post_filter"] = "no_documents"
     if "низк" in lower and ("исполн" in lower or "касс" in lower):
         action["post_filter"] = "low_cash"
+    if "разрыв" in lower or "одном источник" in lower or "одного источник" in lower:
+        action["post_filter"] = "data_gap"
+        action["open_view"] = "problems"
+    if "непровер" in lower or "новые для провер" in lower:
+        action["post_filter"] = "unreviewed"
+        action["open_view"] = "problems"
 
-    date_match = re.search(r"\b(\d{2})[.](\d{2})[.](20\d{2})\b", message)
-    if date_match:
-        day, month, year = date_match.groups()
-        action["date"] = f"{year}-{month}-{day}"
+    if any(word in lower for word in ("контроль загруз", "проверить загруз", "качество загруз", "качество данных")):
+        intent = "help"
+        action["q"] = ""
+        action["open"] = "control"
+        action["open_view"] = "overview"
+        confidence = max(confidence, 0.9)
+
+    if any(word in lower for word in ("скачать", "выгрузи", "выгрузить", "экспорт")):
+        if "pdf" in lower or "пдф" in lower:
+            action["download"] = "pdf"
+        elif "csv" in lower or "таблиц" in lower:
+            action["download"] = "csv"
+        else:
+            action["download"] = "excel"
+        if action["download"] == "excel":
+            intent = "export_excel"
+        confidence = max(confidence, 0.84)
 
     if any(phrase in lower for phrase in ("что такое", "объясни", "расскажи")):
         intent = "explain_metric" if any(word in lower for word in ("бо", "касс", "лимит", "метрик")) else "explain_template"
@@ -1689,6 +1774,8 @@ def assistant_rule_based(message: str, context: dict | None = None) -> dict:
     search_text = clean_search_text(message)
     if intent in {"run_query", "run_compare", "find_object"} and search_text:
         action["q"] = search_text
+        if re.fullmatch(r"\d{4,}", search_text) and search_text not in {"6105", "0970", "970", "0978", "978"}:
+            action["code"] = search_text
 
     rag_context = retrieve_rag_context(message, limit=2)
     explanation = ""
@@ -1698,6 +1785,7 @@ def assistant_rule_based(message: str, context: dict | None = None) -> dict:
     alternative_label = "Искать во всех данных" if search_text else "Показать все данные"
     followups = [
         {"label": "Открыть главный риск", "action": {"open": "top_risk"}},
+        {"label": "Показать контроль загрузки", "action": {"open": "control"}},
         {"label": "Скачать Excel", "action": {"download": "excel"}},
     ]
     alternatives = [
@@ -1750,11 +1838,17 @@ def validate_assistant_action(action: dict, fallback: dict) -> dict:
         result["post_filter"] = action.get("post_filter") or ""
     if action.get("open_view") in ASSISTANT_OPEN_VIEWS:
         result["open_view"] = action["open_view"]
+    if action.get("open") in ASSISTANT_OPEN_ACTIONS:
+        result["open"] = action.get("open") or ""
+    if action.get("download") in ASSISTANT_DOWNLOAD_ACTIONS:
+        result["download"] = action.get("download") or ""
     if isinstance(action.get("reset_scope"), bool):
         result["reset_scope"] = action["reset_scope"]
     for key in ("date", "base", "target"):
-        if action.get(key) in dates:
-            result[key] = action[key]
+        if action.get(key):
+            normalized_date = closest_reporting_date(str(action.get(key)), dates)
+            if normalized_date:
+                result[key] = normalized_date
     metrics = action.get("metrics")
     if isinstance(metrics, list):
         filtered = [metric for metric in metrics if metric in METRIC_KEYS]
@@ -1763,12 +1857,12 @@ def validate_assistant_action(action: dict, fallback: dict) -> dict:
     if result.get("mode") == "compare":
         result["base"] = result.get("base") if result.get("base") in dates else first_date
         result["target"] = result.get("target") if result.get("target") in dates else last_date
-        result.setdefault("open_view", "changes")
+        result["open_view"] = "changes"
     else:
         result["date"] = result.get("date") if result.get("date") in dates else last_date
         result.pop("base", None)
         result.pop("target", None)
-        result.setdefault("open_view", "problems" if result.get("post_filter") else "overview")
+        result["open_view"] = result.get("open_view") if result.get("open_view") in ASSISTANT_OPEN_VIEWS else "problems" if result.get("post_filter") else "overview"
     return result
 
 
@@ -1790,6 +1884,66 @@ def validate_assistant_followups(followups: object) -> list[dict]:
     return result
 
 
+def apply_message_overrides(message: str, action: dict) -> dict:
+    """Исправляет типовые промахи LLM по датам, фильтрам и служебному поиску."""
+    result = dict(action)
+    lower = message.lower()
+    dates = extract_assistant_dates(message)
+
+    if "скк" in lower or "6105" in lower:
+        result["template"] = "skk"
+    elif "кик" in lower or "978" in lower:
+        result["template"] = "kik"
+    elif "2/3" in lower or "970" in lower:
+        result["template"] = "two_thirds"
+    elif "окв" in lower or "капитал" in lower or "капвлож" in lower:
+        result["template"] = "okv"
+
+    if any(word in lower for word in ("сравн", "измен", "динамик")):
+        start, end = default_date_range()
+        result["mode"] = "compare"
+        result["base"] = dates[0] if len(dates) >= 1 else result.get("base") or start
+        result["target"] = dates[1] if len(dates) >= 2 else result.get("target") or end
+        result["open_view"] = "changes"
+    elif dates:
+        result["mode"] = "slice"
+        result["date"] = dates[-1]
+
+    if any(word in lower for word in ("проблем", "нет касс", "без касс", "низк", "нет оплат", "нет платеж", "без оплат", "без платеж", "нет документ", "без документ", "нет договор", "без договор", "нет соглаш", "без соглаш", "непровер", "разрыв")):
+        result["open_view"] = "problems"
+        result.setdefault("post_filter", "execution_problems")
+    if "нет касс" in lower or "без касс" in lower or ("нулев" in lower and "касс" in lower):
+        result["post_filter"] = "no_cash"
+    if "нет оплат" in lower or "нет платеж" in lower or "без оплат" in lower or "без платеж" in lower:
+        result["post_filter"] = "no_payments"
+    if "нет документ" in lower or "без документ" in lower or "нет договор" in lower or "без договор" in lower or "нет соглаш" in lower or "без соглаш" in lower:
+        result["post_filter"] = "no_documents"
+    if "низк" in lower and ("исполн" in lower or "касс" in lower):
+        result["post_filter"] = "low_cash"
+    if "разрыв" in lower or "одном источник" in lower or "одного источник" in lower:
+        result["post_filter"] = "data_gap"
+    if "непровер" in lower:
+        result["post_filter"] = "unreviewed"
+
+    if any(word in lower for word in ("касс", "исполн", "платеж", "оплат", "буау", "бу/ау")):
+        result["metrics"] = ["cash", "payment", "buau"]
+    if any(word in lower for word in ("лимит", "план", "бо")):
+        result["metrics"] = ["limit", "obligation"]
+    if result.get("post_filter"):
+        result["metrics"] = ["limit", "obligation", "cash", "agreement", "contract", "payment", "buau"]
+
+    if any(word in lower for word in ("контроль загруз", "проверить загруз", "качество загруз", "качество данных")):
+        result["open"] = "control"
+        result["open_view"] = "overview"
+    if any(word in lower for word in ("скачать", "выгрузи", "выгрузить", "экспорт")):
+        result["download"] = "pdf" if "pdf" in lower or "пдф" in lower else "csv" if "csv" in lower or "таблиц" in lower else "excel"
+
+    result["q"] = clean_search_text(message)
+    if re.fullmatch(r"\d{4,}", result["q"]) and result["q"] not in {"6105", "0970", "970", "0978", "978"}:
+        result["code"] = result["q"]
+    return result
+
+
 def assistant_json_schema() -> dict:
     action_schema = {
         "type": "object",
@@ -1800,6 +1954,8 @@ def assistant_json_schema() -> dict:
             "date": {"type": "string"},
             "base": {"type": "string"},
             "target": {"type": "string"},
+            "open": {"type": "string", "enum": sorted(ASSISTANT_OPEN_ACTIONS)},
+            "download": {"type": "string", "enum": sorted(ASSISTANT_DOWNLOAD_ACTIONS)},
             "q": {"type": "string"},
             "code": {"type": "string"},
             "budget": {"type": "string"},
@@ -1845,27 +2001,25 @@ def assistant_json_schema() -> dict:
 
 
 def groq_chat_completion(model: str, api_key: str, messages: list[dict], response_format: dict) -> dict:
-    body = json.dumps(
-        {
-            "model": model,
-            "messages": messages,
-            "temperature": 0.1,
-            "response_format": response_format,
-        },
-        ensure_ascii=False,
-    ).encode("utf-8")
-    request = UrlRequest(
+    payload_request = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.1,
+        "max_completion_tokens": 700,
+        "response_format": response_format,
+    }
+    response = requests.post(
         "https://api.groq.com/openai/v1/chat/completions",
-        data=body,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        method="POST",
+        json=payload_request,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": "expense-analytics/1.0",
+        },
+        timeout=30,
     )
-    try:
-        with urlopen(request, timeout=20) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except HTTPError as error:
-        error.close()
-        raise
+    response.raise_for_status()
+    payload = response.json()
     return json.loads(payload["choices"][0]["message"]["content"])
 
 
@@ -1874,55 +2028,74 @@ def assistant_llm(message: str, context: dict, rag_context: str) -> dict:
     api_key = os.environ.get("GROQ_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError("GROQ_API_KEY is not set")
-    model = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b").strip() or "openai/gpt-oss-120b"
+    model = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant").strip() or "llama-3.1-8b-instant"
     start, end = default_date_range()
     system_prompt = (
-        "Ты помощник конструктора бюджетных выборок. Ты не считаешь суммы сам. "
-        "Если пользователь просит деньги или итоги, выбери action; backend посчитает. "
-        "Верни только JSON без markdown. Выбирай только разрешенные шаблоны, метрики и фильтры. "
-        "Не придумывай даты: используй только available_dates.all. Не проси raw records. Допустимые intent: "
-        + ", ".join(sorted(ASSISTANT_INTENTS))
-        + ". Допустимые шаблоны: "
-        + ", ".join(TEMPLATES)
-        + ". Допустимые метрики: "
-        + ", ".join(METRIC_KEYS)
-        + ". JSON должен соответствовать schema assistant_action."
+        "Return only compact JSON: intent, confidence, message, action, followups. "
+        "Do not calculate money. Use only allowed codes from user JSON. "
+        "Rules: SKK/6105=skk, KIK/978=kik, 970/2/3=two_thirds, OKV/capital=okv. "
+        "Compare=>mode compare, base first date, target second date, open_view changes. "
+        "No cash=>no_cash; no payments=>no_payments; no docs/contracts/agreements=>no_documents; unreviewed=>unreviewed; data gaps=>data_gap. "
+        "Control load=>open control and q empty. Download=>download excel/pdf/csv and q empty. "
+        "Do not put dates, months, service words, metric words, template words into q."
     )
     user_payload = {
         "message": message,
-        "context": context,
-        "available_dates": {"start": start, "end": end, "all": STORE.meta.get("reporting_dates", [])},
-        "templates": {code: item["description"] for code, item in TEMPLATES.items()},
-        "metrics": METRICS,
-        "post_filters": {code: code for code in sorted(ASSISTANT_POST_FILTERS)},
-        "quick_actions": quick_actions_payload(),
-        "rag_context": rag_context,
+        "context": {
+            "mode": context.get("mode") or "slice",
+            "template": context.get("template") or "all",
+            "date": context.get("date") or end,
+            "base": context.get("base") or start,
+            "target": context.get("target") or end,
+        },
+        "allowed": {
+            "intents": sorted(ASSISTANT_INTENTS),
+            "dates": STORE.meta.get("reporting_dates", []),
+            "templates": list(TEMPLATES),
+            "metrics": METRIC_KEYS,
+            "post_filters": sorted(ASSISTANT_POST_FILTERS),
+            "open_views": sorted(ASSISTANT_OPEN_VIEWS),
+            "open": sorted(ASSISTANT_OPEN_ACTIONS),
+            "download": sorted(ASSISTANT_DOWNLOAD_ACTIONS),
+        },
+        "required_action_fields": sorted(ASSISTANT_ACTION_FIELDS),
     }
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": json.dumps(json_safe(user_payload), ensure_ascii=False)},
     ]
-    schema_format = {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "assistant_action",
-            "strict": True,
-            "schema": assistant_json_schema(),
-        },
-    }
-    try:
-        parsed = groq_chat_completion(model, api_key, messages, schema_format)
-    except Exception:
+    if model.startswith("llama-") or model.startswith("meta-llama/"):
         parsed = groq_chat_completion(model, api_key, messages, {"type": "json_object"})
+    else:
+        schema_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "assistant_action",
+                "strict": True,
+                "schema": assistant_json_schema(),
+            },
+        }
+        try:
+            parsed = groq_chat_completion(model, api_key, messages, schema_format)
+        except requests.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code == 429:
+                raise
+            parsed = groq_chat_completion(model, api_key, messages, {"type": "json_object"})
+        except Exception:
+            parsed = groq_chat_completion(model, api_key, messages, {"type": "json_object"})
     fallback = assistant_rule_based(message, context)
     intent = parsed.get("intent") if parsed.get("intent") in ASSISTANT_INTENTS else fallback["intent"]
     action = validate_assistant_action(parsed.get("action", {}), fallback["action"])
+    action = validate_assistant_action(apply_message_overrides(message, action), fallback["action"])
     followups = validate_assistant_followups(parsed.get("followups")) or fallback.get("followups", [])
+    response_message = str(parsed.get("message") or fallback["message"])[:1000]
+    if "Я понял запрос" not in response_message:
+        response_message = fallback["message"]
     return {
         "mode": "llm",
         "intent": intent,
         "confidence": float(parsed.get("confidence") or fallback["confidence"]),
-        "message": str(parsed.get("message") or fallback["message"])[:1000],
+        "message": response_message,
         "action": action,
         "followups": followups,
         "alternatives": fallback.get("alternatives", []),
@@ -1973,7 +2146,7 @@ def explain_llm(kind: str, payload: dict) -> dict:
     api_key = os.environ.get("GROQ_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError("GROQ_API_KEY is not set")
-    model = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b").strip() or "openai/gpt-oss-120b"
+    model = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant").strip() or "llama-3.1-8b-instant"
     allowed_payload = {
         "kind": kind,
         "attention_summary": payload.get("attention_summary") if isinstance(payload.get("attention_summary"), dict) else {},

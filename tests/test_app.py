@@ -457,6 +457,55 @@ class DataLoadTests(unittest.TestCase):
         self.assertIn(payload["action"]["post_filter"], {"execution_problems", "no_cash"})
         self.assertEqual(payload["action"]["open_view"], "problems")
 
+    def test_assistant_rule_based_understands_dates_and_service_actions(self):
+        payload = app.assistant_rule_based("покажи СКК за март 2026", {"mode": "slice", "template": "all"})
+        self.assertEqual(payload["action"]["template"], "skk")
+        self.assertEqual(payload["action"]["date"], "2026-03-01")
+        self.assertEqual(payload["action"]["q"], "")
+
+        compare = app.assistant_rule_based("сравни СКК февраль 2025 и апрель 2026", {"mode": "slice", "template": "all"})
+        self.assertEqual(compare["action"]["mode"], "compare")
+        self.assertEqual(compare["action"]["base"], "2025-02-01")
+        self.assertEqual(compare["action"]["target"], "2026-04-01")
+        self.assertEqual(compare["action"]["open_view"], "changes")
+        self.assertEqual(compare["action"]["q"], "")
+
+        no_docs = app.assistant_rule_based("покажи объекты без договоров по ОКВ", {"mode": "slice", "template": "all"})
+        self.assertEqual(no_docs["action"]["template"], "okv")
+        self.assertEqual(no_docs["action"]["post_filter"], "no_documents")
+        self.assertEqual(no_docs["action"]["open_view"], "problems")
+
+        unreviewed = app.assistant_rule_based("показать непроверенные проблемы СКК", {"mode": "slice", "template": "all"})
+        self.assertEqual(unreviewed["action"]["post_filter"], "unreviewed")
+        self.assertEqual(unreviewed["action"]["open_view"], "problems")
+
+        control = app.assistant_rule_based("покажи контроль загрузки", {"mode": "slice", "template": "all"})
+        self.assertEqual(control["action"]["open"], "control")
+        self.assertEqual(control["action"]["q"], "")
+
+        export = app.assistant_rule_based("скачать excel по СКК", {"mode": "slice", "template": "all"})
+        self.assertEqual(export["intent"], "export_excel")
+        self.assertEqual(export["action"]["download"], "excel")
+        self.assertEqual(export["action"]["q"], "")
+
+    def test_assistant_message_overrides_clean_bad_llm_like_action(self):
+        fallback = app.assistant_rule_based("сравни СКК февраль 2025 и апрель 2026", {})["action"]
+        dirty = {
+            "mode": "slice",
+            "template": "all",
+            "date": "2026-04-01",
+            "q": "сравни СКК февраль 2025 и апрель 2026",
+            "metrics": ["limit"],
+            "open_view": "overview",
+        }
+        action = app.validate_assistant_action(app.apply_message_overrides("сравни СКК февраль 2025 и апрель 2026", dirty), fallback)
+        self.assertEqual(action["mode"], "compare")
+        self.assertEqual(action["template"], "skk")
+        self.assertEqual(action["base"], "2025-02-01")
+        self.assertEqual(action["target"], "2026-04-01")
+        self.assertEqual(action["q"], "")
+        self.assertEqual(action["open_view"], "changes")
+
     def test_malformed_llm_response_falls_back_rule_based(self):
         old_key = os.environ.get("GROQ_API_KEY")
         original = app.assistant_llm

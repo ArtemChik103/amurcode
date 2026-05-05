@@ -2,6 +2,7 @@ import tempfile
 import threading
 import unittest
 import re
+import os
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -21,6 +22,8 @@ class PlaywrightUiTests(unittest.TestCase):
         if sync_playwright is None:
             raise unittest.SkipTest("playwright is not installed")
         cls.old_reviews_path = app.REVIEWS_PATH
+        cls.old_assistant_enabled = os.environ.get("ASSISTANT_ENABLED")
+        os.environ["ASSISTANT_ENABLED"] = "false"
         cls.reviews_temp = tempfile.TemporaryDirectory()
         app.REVIEWS_PATH = Path(cls.reviews_temp.name) / "reviews.json"
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
@@ -40,6 +43,10 @@ class PlaywrightUiTests(unittest.TestCase):
         cls.server.server_close()
         cls.thread.join(timeout=5)
         app.REVIEWS_PATH = cls.old_reviews_path
+        if cls.old_assistant_enabled is None:
+            os.environ.pop("ASSISTANT_ENABLED", None)
+        else:
+            os.environ["ASSISTANT_ENABLED"] = cls.old_assistant_enabled
         cls.reviews_temp.cleanup()
 
     def setUp(self):
@@ -129,7 +136,7 @@ class PlaywrightUiTests(unittest.TestCase):
         search.fill("Покажи СКК")
         search.press("Enter")
         self.page.get_by_text("Я понял запрос").wait_for(timeout=10000)
-        self.page.get_by_text("Запрос разобран по правилам").wait_for(timeout=10000)
+        self.page.get_by_text(re.compile("Запрос разобран (по правилам|помощником)")).wait_for(timeout=10000)
         self.page.locator(".eyebrow", has_text="СКК").wait_for(timeout=10000)
         self.page.get_by_text("Короткий вывод").wait_for(timeout=10000)
 

@@ -780,6 +780,8 @@ createApp({
               mode: this.mode,
               template: this.filters.template,
               date: this.filters.date,
+              base: this.filters.base,
+              target: this.filters.target,
               selected_metrics: this.activeMetricCodes,
               available_dates: this.activeDateValues,
             },
@@ -937,6 +939,18 @@ createApp({
         }
         this.explanation = null;
       }, shouldScroll);
+      if (action.open === "control") {
+        await this.loadControl();
+      } else if (action.open === "top_risk" && this.topRisks[0]) {
+        await this.openObject(this.topRisks[0]);
+      }
+      if (action.download === "excel") {
+        this.exportExcel();
+      } else if (action.download === "pdf") {
+        this.exportPdf();
+      } else if (action.download === "csv") {
+        this.exportCsv();
+      }
     },
 
     async applyEmptySuggestion(item) {

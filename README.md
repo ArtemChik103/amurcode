@@ -122,7 +122,7 @@ notepad .env
 
 ```env
 GROQ_API_KEY=
-GROQ_MODEL=openai/gpt-oss-120b
+GROQ_MODEL=llama-3.1-8b-instant
 ASSISTANT_ENABLED=auto
 RUN_LLM_TESTS=0
 ```
