@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Простая аналитика расходов</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260505-boot" />
   </head>
   <body>
     <div id="app" v-cloak>
@@ -697,7 +697,20 @@
       </dialog>
     </div>
 
-    <script src="/static/vendor/vue.global.prod.js"></script>
-    <script src="/static/app.js"></script>
+    <div id="boot-error" class="boot-error" hidden>
+      <strong>Не удалось загрузить интерфейс.</strong>
+      <span>Обновите страницу без кэша. Если сообщение осталось, проверьте загрузку /static/vendor/vue.global.prod.js и /static/app.js.</span>
+    </div>
+
+    <script src="/static/vendor/vue.global.prod.js?v=20260505-boot"></script>
+    <script src="/static/app.js?v=20260505-boot"></script>
+    <script>
+      window.setTimeout(function () {
+        if (document.querySelector("#app[v-cloak]")) {
+          var bootError = document.getElementById("boot-error");
+          if (bootError) bootError.hidden = false;
+        }
+      }, 1500);
+    </script>
   </body>
 </html>

@@ -80,6 +80,26 @@
   display: none;
 }
 
+.boot-error {
+  margin: 24px auto;
+  max-width: 760px;
+  padding: 18px 20px;
+  border: 1px solid rgba(248, 113, 113, 0.42);
+  border-radius: 8px;
+  background: rgba(127, 29, 29, 0.16);
+  color: var(--text);
+  display: grid;
+  gap: 8px;
+}
+
+.boot-error[hidden] {
+  display: none;
+}
+
+.boot-error span {
+  color: var(--muted);
+}
+
 body {
   margin: 0;
   background:
